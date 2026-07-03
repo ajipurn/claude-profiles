@@ -12,11 +12,24 @@ struct ClaudeProfilesApp: App {
         NSApplication.shared.setActivationPolicy(.accessory)
     }
 
+    private static let menuBarIcon: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.size = NSSize(width: 20, height: 20)
+        return image // full-color; the dark outline reads fine in both menu bar modes
+    }()
+
     var body: some Scene {
         MenuBarExtra {
             PanelView(state: state)
         } label: {
-            Image(systemName: state.isSwitching ? "arrow.triangle.2.circlepath" : "person.crop.circle")
+            if state.isSwitching {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            } else if let icon = Self.menuBarIcon {
+                Image(nsImage: icon)
+            } else {
+                Image(systemName: "person.crop.circle") // `swift run` has no bundle resources
+            }
         }
         .menuBarExtraStyle(.window)
     }
