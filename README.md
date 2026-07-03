@@ -1,104 +1,118 @@
-# Claude Profiles
+<p align="center">
+  <img src="docs/icon.png" width="128" alt="Claude Profiles icon">
+</p>
 
-Native macOS menu bar app for instant Claude Desktop account switching. No Dock icon, no dependencies, no network access.
+<h1 align="center">Claude Profiles</h1>
 
-## How it works
+<p align="center">
+  Switch between Claude Desktop accounts in seconds — log in once per account, never again.
+</p>
 
-Claude Desktop keeps all login state (encrypted cookies, tokens, local storage) in
-`~/Library/Application Support/Claude`. This app:
+---
 
-1. Moves that directory to `~/Library/Application Support/Claude-Profiles/<name>/` (one directory per account).
-2. Replaces `~/Library/Application Support/Claude` with a **symlink** to the active profile.
-3. Switching = gracefully quit Claude → repoint the symlink → relaunch (~3–5 s). You log in once per profile, ever.
+Claude Desktop only remembers **one** login at a time. Switching accounts normally means logging out, logging back in, and losing your sidebar history every single time.
 
-This works because Electron's cookie-encryption key lives in the macOS Keychain **per app**, not per login — every profile directory stays decryptable by the same Claude.app.
+**Claude Profiles** fixes that. It lives in your menu bar and keeps a separate, fully-logged-in copy of Claude for every account you use. Switching takes about 5 seconds: Claude quits, the app swaps profiles, Claude reopens — already logged in.
 
-Profiles can be renamed from the menu (renaming the active one briefly quits Claude to
-repoint the symlink) and deleted — deleting a profile is "logout": the account's login
-state is removed and it must log in again next time. With shared history enabled, the
-combined session list survives profile deletion.
+## Features
 
-The app never reads, parses, or copies cookies, tokens, or Keychain items. Directories are moved and symlinked as opaque blobs.
+- 🔁 **Instant account switching** — one click in the menu bar, ~5 seconds, no login screen
+- 🗂 **Shared session history** *(optional)* — all your accounts see one combined sidebar, so nothing "disappears" when you switch
+- ✏️ **Rename & delete profiles** — hover a profile in the panel; deleting a profile = logging that account out
+- 🚀 **Launch at login**, zero setup after the first run
+- 🔒 **Private by design** — no internet access, no analytics, and it never reads your passwords, cookies, or tokens. It only moves folders around on your Mac.
 
-### Shared session history (optional)
+## Requirements
 
-Claude's sidebar reads session indexes from
-`<profile>/claude-code-sessions/<account-uuid>/<org-uuid>/` (and `local-agent-mode-sessions/`),
-keyed by the logged-in account. "Share session history" merges every profile's trees into
-`Claude-Profiles/_shared-sessions/` and symlinks them back, then links every `<account>/<org>`
-directory to the one with the most files — so all accounts see one combined list.
-A timestamped backup (`~/claude-session-backup-<yyyyMMdd-HHmmss>/`) is created first.
-The operation is idempotent, and new profiles are linked to the shared trees automatically.
-The merge also re-runs on every profile switch (while Claude is quit), so accounts that
-log in *after* enabling join the combined list on the next switch.
+- macOS 13 (Ventura) or newer
+- [Claude Desktop](https://claude.ai/download) installed in `/Applications`
 
-## Safety rails
+## Install
 
-- Nothing that exists and is **not a symlink** is ever deleted or overwritten. If
-  `~/Library/Application Support/Claude` is a real directory, the only allowed operation is first-run migration (a `mv`, no copy/delete).
-- Merges copy before deleting; backups happen before any merge. A crash mid-switch never loses data.
-- If Claude won't quit (even after force-terminate), the switch is aborted and the symlink left untouched.
+1. Download `ClaudeProfiles.zip` from the [latest release](../../releases/latest).
+2. Unzip it and drag **Claude Profiles.app** into your **Applications** folder.
+3. First launch only: **right-click the app → Open → Open**.
+   (The app isn't notarized by Apple yet, so macOS asks once. Nothing else changes.)
 
-## Build & run
+A <img src="docs/icon.png" width="14"> person icon appears in your menu bar — that's it, you're set.
 
-### Development (SwiftPM)
+## Getting started
 
-```sh
-swift run          # runs the menu bar app from the terminal
-swift test         # unit tests (ProfileManager against a fake home dir)
+1. **Click the menu bar icon → "Set Up Profiles…"**
+   Your current Claude login is saved as your first profile (call it anything — "personal", "work", your email…). Claude restarts, still logged in. Nothing is lost.
+2. **Click "New Profile"** to add another account.
+   Claude opens with a login screen — log in with the other account. That's the **only** time you'll ever log into it.
+3. **Switch** by clicking any profile in the list. Done.
+
+### Sharing your session history (optional, recommended)
+
+By default each account has its own sidebar history. Click **"Share Session History…"** once and every profile will show one combined list — switching accounts never hides your sessions again.
+
+A timestamped backup of your history is saved in your home folder first (`claude-session-backup-…`), so this is safe to try.
+
+## FAQ
+
+**Is this safe? Where does my data go?**
+Everything stays on your Mac. The app is open source, makes zero network requests, and never touches passwords, cookies, or tokens — it only moves and links folders. Your profiles live in `~/Library/Application Support/Claude-Profiles/`, as plain folders you can open in Finder.
+
+**Why does logging in still work after switching?**
+Claude's login encryption key is stored per **app** in your Mac's Keychain, not per account. Every profile folder stays readable by the same Claude app.
+
+**What does deleting a profile do?**
+It logs that account out by removing its saved login. You'd have to log in again next time. With shared history enabled, your session list survives.
+
+**How do I uninstall?**
+Quit the app, then move your active profile back where Claude expects it:
+
+```
+1. Open Finder → Go → Go to Folder… → ~/Library/Application Support
+2. Delete the "Claude" shortcut (it's just a link, not your data)
+3. Open Claude-Profiles, drag your main profile folder out, rename it to "Claude"
+4. Trash Claude Profiles.app
 ```
 
-`swift test` needs a full Xcode install (XCTest is not in the Command Line Tools).
+**Something looks broken.**
+The panel will warn you and switching to any profile fixes the link. Worst case: your data is always intact inside `Claude-Profiles/` and the backups — nothing the app does can silently destroy it. It refuses, by design, to ever delete or overwrite a real folder.
 
-Note: when run via `swift run` there is no `.app` bundle, so user notifications fall back to
-log lines and "Launch at login" is unavailable. Use the app bundle for the real experience.
+---
 
-### App bundle (xcodegen)
+## For developers
+
+Native Swift/SwiftUI, zero dependencies. `~/Library/Application Support/Claude` becomes a symlink into `Claude-Profiles/<name>/`; switching = quit Claude → repoint symlink → relaunch. Shared history merges the per-account session trees (`claude-code-sessions`, `local-agent-mode-sessions`) into `_shared-sessions/` and symlinks every `<account>/<org>` dir to the one with the most files. The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
+
+```sh
+swift run     # run from source (menu bar app, no bundle niceties)
+swift test    # unit tests — needs full Xcode (XCTest isn't in the CLI tools)
+```
+
+### App bundle
 
 ```sh
 brew install xcodegen
-xcodegen                       # generates ClaudeProfiles.xcodeproj from project.yml
+xcodegen                      # generates ClaudeProfiles.xcodeproj (LSUIElement, hardened runtime)
 xcodebuild -project ClaudeProfiles.xcodeproj -scheme ClaudeProfiles -configuration Release build
 ```
 
-The generated `Info.plist` sets `LSUIElement` (menu bar only). Hardened Runtime is on,
-App Sandbox is off — the app writes to `~/Library/Application Support` and manages another
-app's lifecycle, which the sandbox forbids. **Direct distribution only; cannot ship on the Mac App Store.**
+App Sandbox is off on purpose — the app manages another app's data directory and lifecycle, which the sandbox forbids. Direct distribution only (no Mac App Store).
 
-### Notarization (direct distribution)
+### Notarization
 
 ```sh
-# 1. Sign with a Developer ID Application certificate
-codesign --force --options runtime --deep \
-  --sign "Developer ID Application: YOUR NAME (TEAMID)" ClaudeProfiles.app
-
-# 2. Submit to Apple
+codesign --force --options runtime --deep --sign "Developer ID Application: NAME (TEAM)" ClaudeProfiles.app
 ditto -c -k --keepParent ClaudeProfiles.app ClaudeProfiles.zip
-xcrun notarytool submit ClaudeProfiles.zip --keychain-profile "AC_PROFILE" --wait
-
-# 3. Staple the ticket
+xcrun notarytool submit ClaudeProfiles.zip --keychain-profile AC_PROFILE --wait
 xcrun stapler staple ClaudeProfiles.app
 ```
 
-(`AC_PROFILE` = credentials stored via `xcrun notarytool store-credentials`.)
-
-## Uninstall / manual recovery
-
-Everything is plain directories and symlinks; recovery never needs the app:
-
-```sh
-APP_SUPPORT=~/Library/Application\ Support
-rm "$APP_SUPPORT/Claude"                              # remove the symlink (only if it IS a symlink)
-mv "$APP_SUPPORT/Claude-Profiles/main" "$APP_SUPPORT/Claude"   # restore a profile as the real dir
-```
-
-Session-history backups live at `~/claude-session-backup-<timestamp>/`.
-
-## Layout
+### Layout
 
 ```
 Sources/ClaudeProfilesCore/   ProfileManager — all filesystem logic, no UI imports, unit-tested
-Sources/ClaudeProfiles/       SwiftUI MenuBarExtra, Claude.app lifecycle, notifications
+Sources/ClaudeProfiles/       SwiftUI menu bar panel, Claude.app lifecycle, notifications
 Tests/                        ProfileManager tests against a temporary fake home directory
 project.yml                   xcodegen config for the .app bundle
 ```
+
+---
+
+*Not affiliated with or endorsed by Anthropic. "Claude" is a trademark of Anthropic, PBC.*
