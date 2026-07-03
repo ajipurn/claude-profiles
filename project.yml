@@ -1,0 +1,27 @@
+name: ClaudeProfiles
+options:
+  bundleIdPrefix: dev.local
+  deploymentTarget:
+    macOS: "13.0"
+targets:
+  ClaudeProfiles:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/ClaudeProfiles
+      - Sources/ClaudeProfilesCore
+    info:
+      path: Support/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleName: Claude Profiles
+        CFBundleDisplayName: Claude Profiles
+        NSHumanReadableCopyright: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.local.ClaudeProfiles
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+        # No entitlements file on purpose: App Sandbox stays OFF (the app must
+        # write to ~/Library/Application Support and manage Claude's lifecycle).
