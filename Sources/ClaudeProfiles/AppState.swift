@@ -70,29 +70,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Creating a profile is just a folder — it never touches the running session.
+    /// The login happens on the first switch to it.
     func newProfile() {
         guard let name = promptForProfileName(
             title: "New profile",
             message: "Name for the new account profile.",
             defaultValue: ""
         ) else { return }
-        run {
-            do {
-                try self.manager.createProfile(name: name)
-            } catch {
-                return Notifier.post("Could not create profile", error.localizedDescription)
-            }
-            guard await self.claude.quit() else { return self.abortQuitFailed() }
-            self.relinkSharedHistoryIfEnabled()
-            do {
-                try self.manager.switchTo(name: name)
-                self.claude.relaunch()
-                Notifier.post("Profile “\(name)” created",
-                              "Log in once in the window that opens — never again after that.")
-            } catch {
-                Notifier.post("Switch failed", error.localizedDescription)
-            }
+        do {
+            try manager.createProfile(name: name)
+            Notifier.post("Profile “\(name)” created",
+                          "Switch to it whenever you're ready — you'll log in once, then never again.")
+        } catch {
+            Notifier.post("Could not create profile", error.localizedDescription)
         }
+        refresh()
     }
 
     func renameProfile(_ name: String) {

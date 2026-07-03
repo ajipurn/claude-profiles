@@ -63,8 +63,10 @@ After that, a <img src="docs/icon.png" width="14"> person icon appears in your m
 1. **Click the menu bar icon → "Set Up Profiles…"**
    Your current Claude login is saved as your first profile (call it anything — "personal", "work", your email…). Claude restarts, still logged in. Nothing is lost.
 2. **Click "New Profile"** to add another account.
-   Claude opens with a login screen — log in with the other account. That's the **only** time you'll ever log into it.
-3. **Switch** by clicking any profile in the list. Done.
+   This only adds it to the list — your current session keeps running, nothing restarts.
+3. **Switch** by clicking any profile in the list. The first switch to a new profile shows
+   Claude's login screen — log in with the other account. That's the **only** time you'll
+   ever log into it. After that, switching is instant and login-free.
 
 ### Sharing your session history (optional, recommended)
 
