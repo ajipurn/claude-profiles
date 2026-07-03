@@ -1,6 +1,8 @@
 import SwiftUI
 import ServiceManagement
 
+let accent = Color(red: 0.85, green: 0.47, blue: 0.34) // matches the app icon
+
 @main
 struct ClaudeProfilesApp: App {
     @StateObject private var state = AppState()
@@ -12,75 +14,291 @@ struct ClaudeProfilesApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContent(state: state)
+            PanelView(state: state)
         } label: {
             Image(systemName: state.isSwitching ? "arrow.triangle.2.circlepath" : "person.crop.circle")
-            Text(state.isSwitching ? "Switching…" : (state.activeProfile ?? "Claude"))
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
     }
 }
 
-struct MenuContent: View {
+// MARK: - Panel
+
+struct PanelView: View {
     @ObservedObject var state: AppState
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 2) {
             if !state.claudeAppFound {
-                Text("Claude.app not found in /Applications or ~/Applications")
+                Banner(icon: "exclamationmark.triangle.fill",
+                       text: "Claude.app not found in /Applications or ~/Applications")
             }
             switch state.mode {
             case .needsSetup:
-                Button("Set up profiles…") { state.setUpProfiles() }
-                    .disabled(!state.claudeAppFound || state.isSwitching)
+                SetupView(state: state)
             case .ready:
                 if state.brokenLink {
-                    Text("⚠️ Active profile is missing — switch to a profile to fix")
+                    Banner(icon: "link.badge.plus",
+                           text: "Active profile is missing — pick a profile to fix it")
                 }
+                SectionLabel("Profiles")
                 ForEach(state.profiles, id: \.self) { name in
-                    if name == state.activeProfile {
-                        Toggle(name, isOn: .constant(true)).disabled(true)
-                    } else {
-                        Button(name) { state.switchTo(name) }
-                            .disabled(!state.claudeAppFound || state.isSwitching)
-                    }
+                    ProfileRow(
+                        name: name,
+                        isActive: name == state.activeProfile,
+                        disabled: !state.claudeAppFound || state.isSwitching,
+                        onSwitch: { state.switchTo(name) },
+                        onRename: { state.renameProfile(name) },
+                        onDelete: { state.deleteProfile(name) }
+                    )
                 }
-                Divider()
-                Button("New profile…") { state.newProfile() }
-                    .disabled(!state.claudeAppFound || state.isSwitching)
+                ActionRow(icon: "plus.circle.fill", title: "New Profile", tint: accent,
+                          disabled: !state.claudeAppFound || state.isSwitching) {
+                    state.newProfile()
+                }
+                PanelDivider()
                 if !state.sharedHistoryEnabled {
-                    Button("Share session history across profiles…") { state.enableSharedHistory() }
-                        .disabled(!state.claudeAppFound || state.isSwitching)
-                }
-                if state.profiles.contains(where: { $0 != state.activeProfile }) {
-                    Menu("Open in new window (experimental)") {
-                        ForEach(state.profiles.filter { $0 != state.activeProfile }, id: \.self) { name in
-                            Button(name) { state.openInNewWindow(name) }
-                        }
+                    ActionRow(icon: "clock.arrow.2.circlepath", title: "Share Session History…",
+                              disabled: !state.claudeAppFound || state.isSwitching) {
+                        state.enableSharedHistory()
                     }
-                    .disabled(!state.claudeAppFound || state.isSwitching)
+                }
+                LaunchAtLoginRow()
+                ActionRow(icon: "folder", title: "Reveal Profiles in Finder") {
+                    state.revealProfilesFolder()
                 }
             }
-            Divider()
-            Toggle("Launch at login", isOn: launchAtLogin)
-            Button("Reveal profiles folder in Finder") { state.revealProfilesFolder() }
-            Divider()
-            Button("Quit Claude Profiles") { NSApp.terminate(nil) }
+            PanelDivider()
+            ActionRow(icon: "power", title: "Quit Claude Profiles") {
+                NSApp.terminate(nil)
+            }
         }
-        .onAppear { state.refresh() } // menu style re-evaluates content on open
+        .padding(6)
+        .frame(width: 280)
+        .onAppear { state.refresh() }
+    }
+}
+
+// MARK: - Rows
+
+struct ProfileRow: View {
+    let name: String
+    let isActive: Bool
+    let disabled: Bool
+    let onSwitch: () -> Void
+    let onRename: () -> Void
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: { if !isActive { onSwitch() } }) {
+                HStack(spacing: 8) {
+                    Avatar(name: name, active: isActive)
+                    Text(name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                    if isActive {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(accent)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableStyle())
+            .disabled(disabled || isActive)
+
+            if hovering && !disabled {
+                IconButton(systemName: "pencil", help: "Rename", action: onRename)
+                if !isActive {
+                    IconButton(systemName: "trash", help: "Delete (logout)", action: onDelete)
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(isActive ? accent.opacity(0.13)
+                      : hovering ? Color.primary.opacity(0.06)
+                      : .clear)
+        )
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+struct ActionRow: View {
+    let icon: String
+    let title: String
+    var tint: Color = .primary
+    var disabled = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .foregroundStyle(tint == .primary ? Color.secondary : tint)
+                    .frame(width: 18)
+                Text(title).foregroundStyle(.primary)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(hovering && !disabled ? Color.primary.opacity(0.06) : .clear)
+            )
+        }
+        .buttonStyle(PressableStyle())
+        .disabled(disabled)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+struct LaunchAtLoginRow: View {
+    @State private var enabled = SMAppService.mainApp.status == .enabled
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.up.forward.app")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.secondary)
+                .frame(width: 18)
+            Toggle("Launch at Login", isOn: $enabled)
+                .toggleStyle(.checkbox)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 30)
+        .onChange(of: enabled) { on in
+            do {
+                if on { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
+            } catch {
+                NSLog("[Claude Profiles] Launch at login failed: %@", error.localizedDescription)
+                enabled = SMAppService.mainApp.status == .enabled
+            }
+        }
+    }
+}
+
+// MARK: - Pieces
+
+struct Avatar: View {
+    let name: String
+    let active: Bool
+
+    private var hue: Double {
+        Double(name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % 360) / 360
     }
 
-    private var launchAtLogin: Binding<Bool> {
-        Binding(
-            get: { SMAppService.mainApp.status == .enabled },
-            set: { enable in
-                do {
-                    if enable { try SMAppService.mainApp.register() }
-                    else { try SMAppService.mainApp.unregister() }
-                } catch {
-                    NSLog("[Claude Profiles] Launch at login failed: %@", error.localizedDescription)
-                }
-            }
-        )
+    var body: some View {
+        ZStack {
+            Circle().fill(
+                active
+                ? AnyShapeStyle(LinearGradient(colors: [accent, accent.opacity(0.7)],
+                                               startPoint: .top, endPoint: .bottom))
+                : AnyShapeStyle(Color(hue: hue, saturation: 0.35, brightness: 0.75).opacity(0.85))
+            )
+            Text(String(name.prefix(2)).uppercased())
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 18, height: 18)
+    }
+}
+
+struct IconButton: View {
+    let systemName: String
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11))
+                .foregroundStyle(hovering ? Color.primary : Color.secondary)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(hovering ? Color.primary.opacity(0.1) : .clear))
+        }
+        .buttonStyle(PressableStyle())
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+}
+
+struct SectionLabel: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
+    }
+}
+
+struct Banner: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 11)).foregroundStyle(.orange)
+            Text(text).font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.orange.opacity(0.1)))
+    }
+}
+
+struct SetupView: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.system(size: 28))
+                .foregroundStyle(accent)
+            Text("One directory per account,\nswitch without ever logging in again.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Set Up Profiles…") { state.setUpProfiles() }
+                .buttonStyle(.borderedProminent)
+                .tint(accent)
+                .disabled(!state.claudeAppFound || state.isSwitching)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+    }
+}
+
+struct PanelDivider: View {
+    var body: some View {
+        Divider().padding(.vertical, 3).padding(.horizontal, 4)
+    }
+}
+
+/// Press feedback: subtle scale, fast ease-out. Never from scale(0), never slow.
+struct PressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

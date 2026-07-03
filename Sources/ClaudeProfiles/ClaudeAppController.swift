@@ -40,14 +40,6 @@ final class ClaudeAppController {
         NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    /// Experimental: second instance on another profile. Claude may ignore the flag;
-    /// failure is not an error state.
-    func openNewWindow(profileDir: URL) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-na", "Claude", "--args", "--user-data-dir=\(profileDir.path)"]
-        try? process.run()
-    }
 }
 
 enum Notifier {

@@ -95,6 +95,57 @@ final class AppState: ObservableObject {
         }
     }
 
+    func renameProfile(_ name: String) {
+        guard let newName = promptForProfileName(
+            title: "Rename profile",
+            message: "New name for “\(name)”.",
+            defaultValue: name,
+            allowing: name
+        ), newName != name else { return }
+        if manager.activeProfile() == name {
+            // Active profile: the symlink must be repointed, so Claude has to quit.
+            run {
+                guard await self.claude.quit() else { return self.abortQuitFailed() }
+                do {
+                    try self.manager.renameProfile(name, to: newName)
+                    Notifier.post("Renamed to “\(newName)”")
+                } catch {
+                    Notifier.post("Rename failed", error.localizedDescription)
+                }
+                self.claude.relaunch()
+            }
+        } else {
+            do {
+                try manager.renameProfile(name, to: newName)
+                Notifier.post("Renamed to “\(newName)”")
+            } catch {
+                Notifier.post("Rename failed", error.localizedDescription)
+            }
+            refresh()
+        }
+    }
+
+    func deleteProfile(_ name: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete profile “\(name)”?"
+        alert.informativeText = "This logs the account out by deleting its data. You would need to log in again next time. "
+            + (sharedHistoryEnabled
+               ? "The shared session history is kept."
+               : "Its session history is deleted with it.")
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try manager.deleteProfile(name: name)
+            Notifier.post("Profile “\(name)” deleted")
+        } catch {
+            Notifier.post("Delete failed", error.localizedDescription)
+        }
+        refresh()
+    }
+
     func enableSharedHistory() {
         let alert = NSAlert()
         alert.messageText = "Share session history across profiles?"
@@ -115,11 +166,6 @@ final class AppState: ObservableObject {
                 Notifier.post("Sharing failed", error.localizedDescription)
             }
         }
-    }
-
-    func openInNewWindow(_ name: String) {
-        claude.openNewWindow(profileDir: manager.profilesDir.appendingPathComponent(name))
-        Notifier.post("Experimental", "If nothing opens for “\(name)”, Claude ignored --user-data-dir; use normal switching instead.")
     }
 
     func revealProfilesFolder() {
@@ -153,7 +199,8 @@ final class AppState: ObservableObject {
     }
 
     /// nil on cancel, empty/invalid name, or collision — caller does nothing (no partial state).
-    private func promptForProfileName(title: String, message: String, defaultValue: String) -> String? {
+    /// `allowing` exempts one name from the collision check (rename to itself).
+    private func promptForProfileName(title: String, message: String, defaultValue: String, allowing: String? = nil) -> String? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -167,7 +214,7 @@ final class AppState: ObservableObject {
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn,
               let name = ProfileManager.sanitize(field.stringValue) else { return nil }
-        guard !profiles.contains(name) else {
+        guard !profiles.contains(name) || name == allowing else {
             Notifier.post("Profile “\(name)” already exists")
             return nil
         }

@@ -13,6 +13,11 @@ Claude Desktop keeps all login state (encrypted cookies, tokens, local storage) 
 
 This works because Electron's cookie-encryption key lives in the macOS Keychain **per app**, not per login — every profile directory stays decryptable by the same Claude.app.
 
+Profiles can be renamed from the menu (renaming the active one briefly quits Claude to
+repoint the symlink) and deleted — deleting a profile is "logout": the account's login
+state is removed and it must log in again next time. With shared history enabled, the
+combined session list survives profile deletion.
+
 The app never reads, parses, or copies cookies, tokens, or Keychain items. Directories are moved and symlinked as opaque blobs.
 
 ### Shared session history (optional)
