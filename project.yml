@@ -10,10 +10,13 @@ targets:
     sources:
       - Sources/ClaudeProfiles
       - Sources/ClaudeProfilesCore
+      - path: Resources
+        buildPhase: resources
     info:
       path: Support/Info.plist
       properties:
         LSUIElement: true
+        CFBundleIconFile: AppIcon
         CFBundleName: Claude Profiles
         CFBundleDisplayName: Claude Profiles
         NSHumanReadableCopyright: ""
