@@ -41,6 +41,7 @@ final class ProfileManagerTests: XCTestCase {
     func testSanitize() {
         XCTAssertEqual(ProfileManager.sanitize("My Profile!"), "MyProfile")
         XCTAssertEqual(ProfileManager.sanitize("work-2_a"), "work-2_a")
+        XCTAssertEqual(ProfileManager.sanitize("user@example.com"), "user@example.com")
         XCTAssertNil(ProfileManager.sanitize(""))
         XCTAssertNil(ProfileManager.sanitize("💥 ééé"))
     }
@@ -184,6 +185,68 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertThrowsError(try pm.createProfile(name: "dup")) {
             XCTAssertEqual($0 as? ProfileError, .profileExists("dup"))
         }
+    }
+
+    // MARK: - Rename / delete
+
+    func testRenameInactiveProfile() throws {
+        try pm.migrate(name: "main")
+        try pm.createProfile(name: "work")
+        try write("x", to: profile("work").appendingPathComponent("marker.txt"))
+
+        XCTAssertEqual(try pm.renameProfile("work", to: "office"), "office")
+        XCTAssertTrue(fm.fileExists(atPath: profile("office").appendingPathComponent("marker.txt").path))
+        XCTAssertFalse(fm.fileExists(atPath: profile("work").path))
+        XCTAssertEqual(pm.activeProfile(), "main") // untouched
+    }
+
+    func testRenameActiveProfileRepointsSymlink() throws {
+        try makeRealClaudeDir()
+        try pm.migrate(name: "main")
+        try pm.renameProfile("main", to: "primary")
+        XCTAssertEqual(pm.activeProfile(), "primary")
+        XCTAssertEqual(
+            try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
+            "cookie-data"
+        )
+    }
+
+    func testRenameRejectsCollisionAndUnknown() throws {
+        try pm.createProfile(name: "a")
+        try pm.createProfile(name: "b")
+        XCTAssertThrowsError(try pm.renameProfile("a", to: "b")) {
+            XCTAssertEqual($0 as? ProfileError, .profileExists("b"))
+        }
+        XCTAssertThrowsError(try pm.renameProfile("ghost", to: "x")) {
+            XCTAssertEqual($0 as? ProfileError, .profileNotFound("ghost"))
+        }
+        XCTAssertEqual(try pm.renameProfile("a", to: "a"), "a") // no-op
+    }
+
+    func testDeleteProfileRefusesActiveDeletesInactive() throws {
+        try pm.migrate(name: "main")
+        try pm.createProfile(name: "gone")
+
+        XCTAssertThrowsError(try pm.deleteProfile(name: "main")) {
+            XCTAssertEqual($0 as? ProfileError, .profileIsActive("main"))
+        }
+        try pm.deleteProfile(name: "gone")
+        XCTAssertEqual(pm.profiles(), ["main"])
+        XCTAssertThrowsError(try pm.deleteProfile(name: "gone")) {
+            XCTAssertEqual($0 as? ProfileError, .profileNotFound("gone"))
+        }
+    }
+
+    func testDeleteProfileKeepsSharedHistory() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+        try pm.migrate(name: "main") // makes "main" active so a/b are deletable
+
+        try pm.deleteProfile(name: "b")
+        // b's sessions were merged into the shared master before; still there.
+        let master = pm.sharedDir.appendingPathComponent("\(ProfileManager.sessionTrees[0])/acct1/org1")
+        XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_3.json").path),
+                      "deleting a profile must not touch shared history")
     }
 
     // MARK: - Shared history

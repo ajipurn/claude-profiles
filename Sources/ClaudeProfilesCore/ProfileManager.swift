@@ -6,6 +6,7 @@ public enum ProfileError: LocalizedError, Equatable {
     case profileNotFound(String)
     case refusedToClobber(String)
     case nothingToMigrate
+    case profileIsActive(String)
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +20,8 @@ public enum ProfileError: LocalizedError, Equatable {
             return "\(path) exists and is not a symlink; refusing to touch it."
         case .nothingToMigrate:
             return "The Claude directory is already managed; migration is not needed."
+        case .profileIsActive(let name):
+            return "Profile “\(name)” is active; switch away before deleting it."
         }
     }
 }
@@ -79,9 +82,10 @@ public final class ProfileManager {
     public var sharedHistoryEnabled: Bool { isRealDirectory(sharedDir) }
 
     public static func sanitize(_ raw: String) -> String? {
-        let allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+        // @ and . allowed so email addresses work as profile names.
+        let allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-@."
         let name = String(raw.filter { allowed.contains($0) })
-        return name.isEmpty ? nil : name
+        return name.isEmpty || name.allSatisfy({ $0 == "." }) ? nil : name
     }
 
     // MARK: - Operations
@@ -126,6 +130,33 @@ public final class ProfileManager {
             }
         }
         return name
+    }
+
+    // MARK: - Rename / delete
+
+    /// Rename a profile. If it is the active one, the symlink is repointed —
+    /// callers must have Claude quit in that case.
+    @discardableResult
+    public func renameProfile(_ name: String, to rawNewName: String) throws -> String {
+        guard let newName = Self.sanitize(rawNewName) else { throw ProfileError.invalidName }
+        guard newName != name else { return name }
+        let src = profilesDir.appendingPathComponent(name)
+        guard isRealDirectory(src) else { throw ProfileError.profileNotFound(name) }
+        let dst = profilesDir.appendingPathComponent(newName)
+        guard !itemExists(dst) else { throw ProfileError.profileExists(newName) }
+        let wasActive = activeProfile() == name
+        try fm.moveItem(at: src, to: dst)
+        if wasActive { try pointClaudeDir(at: dst) } // keep the symlink valid
+        return newName
+    }
+
+    /// Delete a profile — this is "logout": the account's login state is removed.
+    /// The active profile can never be deleted (the symlink points at it).
+    public func deleteProfile(name: String) throws {
+        guard activeProfile() != name else { throw ProfileError.profileIsActive(name) }
+        let dir = profilesDir.appendingPathComponent(name)
+        guard isRealDirectory(dir) else { throw ProfileError.profileNotFound(name) }
+        try fm.removeItem(at: dir) // shared trees are symlinks inside it — shared history survives
     }
 
     /// Merge every profile's session trees into `_shared-sessions` and symlink them back.
