@@ -31,10 +31,32 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 
 1. Download `ClaudeProfiles.zip` from the [latest release](../../releases/latest).
 2. Unzip it and drag **Claude Profiles.app** into your **Applications** folder.
-3. First launch only: **right-click the app → Open → Open**.
-   (The app isn't notarized by Apple yet, so macOS asks once. Nothing else changes.)
+3. Open it once — macOS will show a warning. **This is expected**, see below.
 
-A <img src="docs/icon.png" width="14"> person icon appears in your menu bar — that's it, you're set.
+### "Apple could not verify this app is free of malware…"
+
+This build isn't notarized by Apple yet (that requires a paid Apple Developer account — it's on the roadmap). The app is open source, makes no network connections, and you can read every line it runs — but macOS can't know that, so it warns you **once**. How to get past it:
+
+**macOS 15 (Sequoia) and newer:**
+
+1. Double-click the app → the warning appears → click **Done** (not "Move to Trash").
+2. Open **System Settings → Privacy & Security**, scroll down to
+   *"Claude Profiles.app was blocked to protect your Mac"* → click **Open Anyway**.
+3. Confirm with your password or Touch ID. macOS never asks again.
+
+**macOS 13–14 (Ventura / Sonoma):**
+
+1. **Right-click** (or Control-click) the app → **Open** → **Open**. Once, done.
+
+**Prefer the terminal?** This removes the quarantine mark directly:
+
+```sh
+xattr -d com.apple.quarantine "/Applications/Claude Profiles.app"
+```
+
+**Don't want to trust a downloaded build at all?** Build it yourself from source in ~2 minutes — see [For developers](#for-developers). Apps you build locally never get the warning.
+
+After that, a <img src="docs/icon.png" width="14"> person icon appears in your menu bar — you're set.
 
 ## Getting started
 
@@ -51,6 +73,9 @@ By default each account has its own sidebar history. Click **"Share Session Hist
 A timestamped backup of your history is saved in your home folder first (`claude-session-backup-…`), so this is safe to try.
 
 ## FAQ
+
+**Why does macOS warn me the app might be malware?**
+Because this build isn't notarized (Apple's paid code-review stamp) — not because anything was detected. macOS shows that exact dialog for *every* un-notarized app. See [the install section](#apple-could-not-verify-this-app-is-free-of-malware) for the one-time fix, or build from source to skip it entirely.
 
 **Is this safe? Where does my data go?**
 Everything stays on your Mac. The app is open source, makes zero network requests, and never touches passwords, cookies, or tokens — it only moves and links folders. Your profiles live in `~/Library/Application Support/Claude-Profiles/`, as plain folders you can open in Finder.
