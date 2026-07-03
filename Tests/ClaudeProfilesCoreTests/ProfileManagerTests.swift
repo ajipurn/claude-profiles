@@ -347,6 +347,68 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_9.json").path))
     }
 
+    /// An account that logged in but never opened a Code/agent session has no
+    /// <account>/<org> dir — its sidebar would stay empty forever. The uuids Claude
+    /// writes on login (cowork-enabled-cli-ops.json + config.json dxt keys) let the
+    /// merge pre-link the org dir to the master.
+    func testPrelinksAccountThatNeverOpenedASession() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+        try pm.createProfile(name: "fresh")
+
+        // Login writes both ids into the profile — but no session dirs at all.
+        try write(#"{"ownerAccountId":"acct-fresh"}"#,
+                  to: profile("fresh").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:allowlistEnabled:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": false}"#,
+                  to: profile("fresh").appendingPathComponent("config.json"))
+
+        try pm.enableSharedHistory() // next relink (switch / Claude quit / app launch)
+
+        let code = ProfileManager.sessionTrees[0]
+        let master = pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")
+        let org = pm.sharedDir
+            .appendingPathComponent("\(code)/acct-fresh/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        XCTAssertTrue(isSymlink(org), "org dir must be pre-linked to the master")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path), master.path)
+        // Combined list readable through the fresh profile's own path.
+        XCTAssertTrue(fm.fileExists(atPath: profile("fresh")
+            .appendingPathComponent("\(code)/acct-fresh/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/local_1.json").path))
+
+        // Idempotent: re-run leaves the link alone.
+        try pm.enableSharedHistory()
+        XCTAssertTrue(isSymlink(org))
+    }
+
+    /// Claude Desktop stays resident in the background, so the quit-time merge may
+    /// never get a window. prelinkKnownAccounts is the symlink-only subset that is
+    /// safe to run while Claude is alive.
+    func testPrelinkKnownAccountsStandalone() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+        try pm.createProfile(name: "fresh")
+        try write(#"{"ownerAccountId":"acct-live"}"#,
+                  to: profile("fresh").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:allowlistEnabled:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": false}"#,
+                  to: profile("fresh").appendingPathComponent("config.json"))
+
+        try pm.prelinkKnownAccounts() // no merge — as if Claude were still running
+
+        let code = ProfileManager.sessionTrees[0]
+        let org = pm.sharedDir
+            .appendingPathComponent("\(code)/acct-live/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        XCTAssertTrue(isSymlink(org))
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path),
+                       pm.sharedDir.appendingPathComponent("\(code)/acct1/org1").path)
+
+        // A pending merge (two real org dirs) makes the master ambiguous — no-op then.
+        try write("x", to: pm.sharedDir.appendingPathComponent("\(code)/acct-other/org-other/local_z.json"))
+        try write(#"{"ownerAccountId":"acct-late"}"#,
+                  to: profile("fresh").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try pm.prelinkKnownAccounts()
+        XCTAssertFalse(fm.fileExists(atPath: pm.sharedDir.appendingPathComponent("\(code)/acct-late").path),
+                       "must not pick a master while a merge is pending")
+    }
+
     func testEnableSharedHistoryIsIdempotent() throws {
         try seedTwoProfiles()
         XCTAssertNotNil(try pm.enableSharedHistory())

@@ -18,6 +18,11 @@ final class ClaudeAppController {
         bundleID = appURL.flatMap { Bundle(url: $0)?.bundleIdentifier }
     }
 
+    var isRunning: Bool {
+        guard let bundleID else { return false }
+        return NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == bundleID }
+    }
+
     /// Returns true when Claude ended up not running.
     func quit() async -> Bool {
         guard let bundleID else { return false }

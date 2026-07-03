@@ -18,9 +18,36 @@ final class AppState: ObservableObject {
 
     var claudeAppFound: Bool { claude.appURL != nil }
 
-    init() { refresh() }
+    init() {
+        refresh()
+        // A new account's session dirs join the combined list only when the merge
+        // re-runs, and that is only safe while Claude is not running. Besides the
+        // switch flow, catch the two other moments Claude is known to be down:
+        // whenever it terminates, and at our own launch.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            Task { @MainActor [weak self] in
+                guard let self, let app,
+                      app.bundleIdentifier == self.claude.bundleID,
+                      !self.isSwitching else { return }
+                self.relinkSharedHistoryIfEnabled()
+                self.refresh()
+            }
+        }
+        if !claude.isRunning { relinkSharedHistoryIfEnabled() }
+    }
 
     func refresh() {
+        // Symlink-only, so safe even while Claude runs — a freshly logged-in
+        // account joins the combined list the next time the panel opens.
+        // Claude's sidebar is already in memory, so new links need one restart.
+        if let linked = try? manager.prelinkKnownAccounts(), linked > 0, claude.isRunning {
+            Notifier.post("Session history linked",
+                          "Quit and reopen Claude once to see the combined list.")
+        }
         profiles = manager.profiles()
         activeProfile = manager.activeProfile()
         sharedHistoryEnabled = manager.sharedHistoryEnabled

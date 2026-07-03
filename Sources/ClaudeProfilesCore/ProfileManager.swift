@@ -202,24 +202,99 @@ public final class ProfileManager {
                 // Missing trees get linked too, so future sessions land in the shared tree.
                 try fm.createSymbolicLink(at: link, withDestinationURL: sharedTree)
             }
-            try consolidateOrgDirs(in: sharedTree)
+            let master = try consolidateOrgDirs(in: sharedTree)
+            try prelinkAccounts(in: sharedTree, master: master, profiles: names)
         }
         return backup
+    }
+
+    /// Safe while Claude is running: only creates missing symlinks — never merges,
+    /// moves, or deletes. Lets an account that just logged in join the combined
+    /// list without waiting for a full quit-time merge.
+    /// Returns how many links were created — nonzero means Claude needs a restart
+    /// to pick them up (its sidebar is already loaded in memory).
+    @discardableResult
+    public func prelinkKnownAccounts() throws -> Int {
+        guard sharedHistoryEnabled else { return 0 }
+        let names = profiles()
+        var created = 0
+        for tree in Self.sessionTrees {
+            let sharedTree = sharedDir.appendingPathComponent(tree)
+            var orgDirs: [URL] = []
+            for account in try realSubdirectories(of: sharedTree) {
+                orgDirs.append(contentsOf: try realSubdirectories(of: account))
+            }
+            // Steady state has exactly one real org dir (the master). More than one
+            // means a merge is pending — leave that to the next quit-time relink.
+            guard orgDirs.count == 1 else { continue }
+            created += try prelinkAccounts(in: sharedTree, master: orgDirs[0], profiles: names)
+        }
+        return created
+    }
+
+    /// Accounts that logged in but never opened a Code/agent session have no
+    /// <account>/<org> dir at all, so their sidebar stays empty even after a merge.
+    /// Claude records both uuids in the profile right after login — use them to
+    /// symlink the account's org dir to the master ahead of time.
+    @discardableResult
+    private func prelinkAccounts(in tree: URL, master: URL?, profiles names: [String]) throws -> Int {
+        guard let master else { return 0 }
+        var created = 0
+        for profile in names {
+            let profileDir = profilesDir.appendingPathComponent(profile)
+            guard let account = accountID(of: profileDir) else { continue }
+            for org in orgIDs(of: profileDir) {
+                let orgDir = tree.appendingPathComponent(account).appendingPathComponent(org)
+                guard !itemExists(orgDir) else { continue } // real or already linked
+                try fm.createDirectory(at: orgDir.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.createSymbolicLink(at: orgDir, withDestinationURL: master)
+                created += 1
+            }
+        }
+        return created
+    }
+
+    /// ownerAccountId from cowork-enabled-cli-ops.json — written on login.
+    private func accountID(of profileDir: URL) -> String? {
+        guard let data = try? Data(contentsOf: profileDir.appendingPathComponent("cowork-enabled-cli-ops.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json["ownerAccountId"] as? String
+    }
+
+    /// Org uuids from config.json `dxt:<name>:<org-uuid>` keys — written on login.
+    private func orgIDs(of profileDir: URL) -> Set<String> {
+        guard let data = try? Data(contentsOf: profileDir.appendingPathComponent("config.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [] }
+        var ids: Set<String> = []
+        for key in json.keys where key.hasPrefix("dxt:") {
+            let parts = key.split(separator: ":")
+            if parts.count == 3, parts[2].count == 36 { ids.insert(String(parts[2])) }
+        }
+        return ids
     }
 
     // MARK: - Internals
 
     /// Repoint the `Claude` symlink. Never deletes anything that is not a symlink.
+    /// Atomic: the new link is created beside the old one and rename(2)d over it,
+    /// so a crash mid-switch can never leave the path missing or dangling.
     private func pointClaudeDir(at dest: URL) throws {
         switch claudeDirState() {
-        case .missing:
-            break
-        case .symlink:
-            try fm.removeItem(at: claudeDir) // removes the link itself, not the target
         case .realDirectory, .otherFile:
             throw ProfileError.refusedToClobber(claudeDir.path)
+        case .missing, .symlink:
+            let tmp = claudeDir.deletingLastPathComponent()
+                .appendingPathComponent(".claude-link-\(ProcessInfo.processInfo.processIdentifier)")
+            try? fm.removeItem(at: tmp)
+            try fm.createSymbolicLink(at: tmp, withDestinationURL: dest)
+            guard rename(tmp.path, claudeDir.path) == 0 else {
+                let err = errno
+                try? fm.removeItem(at: tmp)
+                throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            }
         }
-        try fm.createSymbolicLink(at: claudeDir, withDestinationURL: dest)
     }
 
     /// Recursive copy that never overwrites an existing file.
@@ -239,12 +314,14 @@ public final class ProfileManager {
 
     /// Inside a shared tree, pick the <account>/<org> dir with the most files as master,
     /// merge every other real org dir into it, and symlink them to the master.
-    private func consolidateOrgDirs(in tree: URL) throws {
+    /// Returns the master (the tree's single remaining real org dir), if any.
+    @discardableResult
+    private func consolidateOrgDirs(in tree: URL) throws -> URL? {
         var orgDirs: [URL] = []
         for account in try realSubdirectories(of: tree) {
             orgDirs.append(contentsOf: try realSubdirectories(of: account))
         }
-        guard orgDirs.count > 1 else { return }
+        guard orgDirs.count > 1 else { return orgDirs.first }
 
         orgDirs.sort { $0.path < $1.path } // deterministic tie-break
         var master = orgDirs[0]
@@ -258,6 +335,7 @@ public final class ProfileManager {
             try fm.removeItem(at: dir)
             try fm.createSymbolicLink(at: dir, withDestinationURL: master)
         }
+        return master
     }
 
     private func realSubdirectories(of url: URL) throws -> [URL] {
