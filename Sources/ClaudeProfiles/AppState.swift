@@ -59,6 +59,7 @@ final class AppState: ObservableObject {
     func switchTo(_ name: String) {
         run {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
+            self.relinkSharedHistoryIfEnabled()
             do {
                 try self.manager.switchTo(name: name)
                 Notifier.post("Switched to \(name)")
@@ -82,6 +83,7 @@ final class AppState: ObservableObject {
                 return Notifier.post("Could not create profile", error.localizedDescription)
             }
             guard await self.claude.quit() else { return self.abortQuitFailed() }
+            self.relinkSharedHistoryIfEnabled()
             do {
                 try self.manager.switchTo(name: name)
                 self.claude.relaunch()
@@ -134,6 +136,16 @@ final class AppState: ObservableObject {
             self.isSwitching = false
             self.refresh()
         }
+    }
+
+    /// Accounts that log in after shared history was enabled create fresh
+    /// <account>/<org> dirs inside the shared trees. Re-running the idempotent
+    /// merge links them to the master — only safe while Claude is quit, which
+    /// is why this runs during switches and not on a timer.
+    private func relinkSharedHistoryIfEnabled() {
+        guard manager.sharedHistoryEnabled else { return }
+        do { try manager.enableSharedHistory() }
+        catch { Notifier.post("Session re-link failed", error.localizedDescription) }
     }
 
     private func abortQuitFailed() {

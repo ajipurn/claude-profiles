@@ -24,6 +24,8 @@ keyed by the logged-in account. "Share session history" merges every profile's t
 directory to the one with the most files — so all accounts see one combined list.
 A timestamped backup (`~/claude-session-backup-<yyyyMMdd-HHmmss>/`) is created first.
 The operation is idempotent, and new profiles are linked to the shared trees automatically.
+The merge also re-runs on every profile switch (while Claude is quit), so accounts that
+log in *after* enabling join the combined list on the next switch.
 
 ## Safety rails
 

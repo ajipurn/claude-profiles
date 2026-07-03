@@ -266,6 +266,24 @@ final class ProfileManagerTests: XCTestCase {
         )
     }
 
+    func testRerunLinksAccountThatLoggedInAfterEnable() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+
+        // A new account logs in on a fresh profile: Claude writes its org dir
+        // through the profile symlink, i.e. straight into the shared tree.
+        let code = ProfileManager.sessionTrees[0]
+        try write("n1", to: pm.sharedDir.appendingPathComponent("\(code)/acct3/org3/local_9.json"))
+
+        try pm.enableSharedHistory() // re-run on next profile switch
+
+        let master = pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")
+        let newcomer = pm.sharedDir.appendingPathComponent("\(code)/acct3/org3")
+        XCTAssertTrue(isSymlink(newcomer), "new account's org dir should be linked to master")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: newcomer.path), master.path)
+        XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_9.json").path))
+    }
+
     func testEnableSharedHistoryIsIdempotent() throws {
         try seedTwoProfiles()
         XCTAssertNotNil(try pm.enableSharedHistory())
