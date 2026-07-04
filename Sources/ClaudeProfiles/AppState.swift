@@ -7,6 +7,7 @@ final class AppState: ObservableObject {
     enum Mode { case needsSetup, ready }
 
     let manager = ProfileManager()
+    let cli = CLIProfileManager()
     let claude = ClaudeAppController()
 
     @Published var profiles: [String] = []
@@ -15,6 +16,11 @@ final class AppState: ObservableObject {
     @Published var brokenLink = false
     @Published var sharedHistoryEnabled = false
     @Published var isSwitching = false
+    @Published var allProfiles: [String] = []   // one list: every name, Desktop and/or CLI
+    @Published var cliCreated: Set<String> = [] // names that have a CLI config dir
+    @Published var activeCLIProfile: String?    // nil = default ~/.claude
+    @Published var cliSetUp = false
+    @Published var cliDefaultHidden = false
 
     var claudeAppFound: Bool { claude.appURL != nil }
 
@@ -51,6 +57,15 @@ final class AppState: ObservableObject {
         profiles = manager.profiles()
         activeProfile = manager.activeProfile()
         sharedHistoryEnabled = manager.sharedHistoryEnabled
+        // One list for both worlds. A profile is "tagged" for a context once its
+        // dir exists there; dirs are created on first use. The *login* can never
+        // carry over — Desktop and CLI have separate auth — so each context
+        // still asks to log in once.
+        cliCreated = Set(cli.profiles())
+        allProfiles = cliCreated.union(profiles).sorted()
+        activeCLIProfile = cli.activeProfile()
+        cliSetUp = cli.isSetUp
+        cliDefaultHidden = cli.defaultHidden
         let state = manager.claudeDirState()
         if case .symlink(_, false) = state { brokenLink = true } else { brokenLink = false }
         switch state {
@@ -88,6 +103,9 @@ final class AppState: ObservableObject {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
             self.relinkSharedHistoryIfEnabled()
             do {
+                if !self.manager.profiles().contains(name) {
+                    try self.manager.createProfile(name: name) // CLI-only name used for Desktop — dir on demand
+                }
                 try self.manager.switchTo(name: name)
                 Notifier.post("Switched to \(name)")
             } catch {
@@ -103,31 +121,56 @@ final class AppState: ObservableObject {
         guard let name = promptForProfileName(
             title: "New profile",
             message: "Name for the new account profile.",
-            defaultValue: ""
+            defaultValue: "",
+            existing: allProfiles
         ) else { return }
         do {
             try manager.createProfile(name: name)
             Notifier.post("Profile “\(name)” created",
-                          "Switch to it whenever you're ready — you'll log in once, then never again.")
+                          "Use it for Desktop or CLI whenever you're ready — each logs in once, then never again.")
         } catch {
             Notifier.post("Could not create profile", error.localizedDescription)
         }
         refresh()
     }
 
+    /// Renames a profile everywhere it exists, so the row never splits in two.
+    /// The CLI side cannot survive a rename (its path is the Keychain identity),
+    /// so the user is warned that it will be logged out.
     func renameProfile(_ name: String) {
         guard let newName = promptForProfileName(
             title: "Rename profile",
             message: "New name for “\(name)”.",
             defaultValue: name,
+            existing: allProfiles,
             allowing: name
         ), newName != name else { return }
-        if manager.activeProfile() == name {
-            // Active profile: the symlink must be repointed, so Claude has to quit.
+        let hasDesktop = profiles.contains(name)
+        let hasCLI = cliCreated.contains(name)
+        if hasCLI {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Rename logs the CLI side out"
+            alert.informativeText = "Claude Code ties this profile's terminal login to its folder path. "
+                + "After renaming, the next `claude` run asks you to log in once again. "
+                + (hasDesktop ? "The Desktop login is kept." : "")
+            alert.addButton(withTitle: "Rename")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let renameCLI = { @MainActor in
+            guard hasCLI else { return }
+            do { try self.cli.renameProfile(name, to: newName) }
+            catch { Notifier.post("CLI rename failed", error.localizedDescription) }
+        }
+        if hasDesktop, manager.activeProfile() == name {
+            // Active Desktop profile: the symlink must be repointed, so Claude has to quit.
             run {
                 guard await self.claude.quit() else { return self.abortQuitFailed() }
                 do {
                     try self.manager.renameProfile(name, to: newName)
+                    renameCLI()
                     Notifier.post("Renamed to “\(newName)”")
                 } catch {
                     Notifier.post("Rename failed", error.localizedDescription)
@@ -136,7 +179,8 @@ final class AppState: ObservableObject {
             }
         } else {
             do {
-                try manager.renameProfile(name, to: newName)
+                if hasDesktop { try manager.renameProfile(name, to: newName) }
+                renameCLI()
                 Notifier.post("Renamed to “\(newName)”")
             } catch {
                 Notifier.post("Rename failed", error.localizedDescription)
@@ -145,20 +189,30 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Deletes the profile everywhere it exists — Desktop (= logout) and CLI data.
     func deleteProfile(_ name: String) {
+        let hasDesktop = profiles.contains(name)
+        let hasCLI = cliCreated.contains(name)
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Delete profile “\(name)”?"
-        alert.informativeText = "This logs the account out by deleting its data. You would need to log in again next time. "
-            + (sharedHistoryEnabled
-               ? "The shared session history is kept."
-               : "Its session history is deleted with it.")
+        var info = "This logs the account out by deleting its data. You would need to log in again next time. "
+        if hasDesktop {
+            info += sharedHistoryEnabled
+                ? "The shared session history is kept. "
+                : "Its session history is deleted with it. "
+        }
+        if hasCLI {
+            info += "Its CLI login token stays in your Keychain until you remove it yourself (Keychain Access)."
+        }
+        alert.informativeText = info
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            try manager.deleteProfile(name: name)
+            if hasDesktop { try manager.deleteProfile(name: name) } // throws if active
+            if hasCLI { try cli.deleteProfile(name: name) }
             Notifier.post("Profile “\(name)” deleted")
         } catch {
             Notifier.post("Delete failed", error.localizedDescription)
@@ -192,6 +246,84 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([manager.profilesDir])
     }
 
+    // MARK: - CLI profiles
+
+    /// Instant: no quit, no relaunch. Applies to `claude` commands started
+    /// from now on — running terminal sessions keep their account.
+    func switchCLI(_ name: String?) {
+        do {
+            var firstTime = false
+            if let name, !cliCreated.contains(name) {
+                try cli.createProfile(name: name) // mirrored Desktop name — dir on demand
+                firstTime = true
+            }
+            try cli.setActive(name)
+            Notifier.post("CLI: \(name ?? "Default") selected",
+                          firstTime
+                          ? "Run claude in a new terminal — it asks you to log in once."
+                          : "Applies to claude commands you start from now on.")
+        } catch {
+            Notifier.post("CLI switch failed", error.localizedDescription)
+        }
+        refresh()
+    }
+
+    func setUpCLIProfiles() {
+        do {
+            try cli.installShim()
+        } catch {
+            Notifier.post("CLI setup failed", error.localizedDescription)
+            return
+        }
+        refresh()
+        showCLIPathHelp(firstTime: true)
+    }
+
+    /// Hiding is UI-only: the ~/.claude account keeps working as the fallback,
+    /// nothing is deleted, and the row can come back from the ? dialog.
+    func hideDefaultRow() {
+        let alert = NSAlert()
+        alert.messageText = "Hide the Default profile?"
+        alert.informativeText = "Default is your original ~/.claude account — the one claude used before profiles, "
+            + "with all its settings and plugins. Hiding only removes this row; nothing is deleted"
+            + (activeCLIProfile == nil ? ", and terminal commands keep using it until you pick another profile" : "")
+            + ". Bring it back anytime via the ? button."
+        alert.addButton(withTitle: "Hide")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do { try cli.setDefaultHidden(true) }
+        catch { Notifier.post("Could not hide Default", error.localizedDescription) }
+        refresh()
+    }
+
+    /// The shim only takes effect once its bin dir is on PATH — one manual
+    /// ~/.zshrc line. Editing the user's shell config is not this app's place.
+    func showCLIPathHelp(firstTime: Bool = false) {
+        let alert = NSAlert()
+        alert.messageText = firstTime ? "One last step" : "CLI profiles — terminal setup"
+        alert.informativeText = "Add this line to the end of ~/.zshrc, then open a new terminal:\n\n"
+            + CLIProfileManager.pathLine + "\n\n"
+            + "After that, every `claude` command uses whichever profile is selected here. "
+            + "Your own aliases and CLAUDE_CONFIG_DIR always take priority."
+        alert.addButton(withTitle: "Copy Line")
+        alert.addButton(withTitle: "Done")
+        if cliDefaultHidden {
+            alert.addButton(withTitle: "Show Default Row")
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(CLIProfileManager.pathLine, forType: .string)
+        case .alertThirdButtonReturn:
+            try? cli.setDefaultHidden(false)
+            refresh()
+        default:
+            break
+        }
+    }
+
     // MARK: - Helpers
 
     private func run(_ body: @escaping () async -> Void) {
@@ -220,7 +352,8 @@ final class AppState: ObservableObject {
 
     /// nil on cancel, empty/invalid name, or collision — caller does nothing (no partial state).
     /// `allowing` exempts one name from the collision check (rename to itself).
-    private func promptForProfileName(title: String, message: String, defaultValue: String, allowing: String? = nil) -> String? {
+    private func promptForProfileName(title: String, message: String, defaultValue: String,
+                                      existing: [String]? = nil, allowing: String? = nil) -> String? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -234,7 +367,7 @@ final class AppState: ObservableObject {
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn,
               let name = ProfileManager.sanitize(field.stringValue) else { return nil }
-        guard !profiles.contains(name) || name == allowing else {
+        guard !(existing ?? profiles).contains(name) || name == allowing else {
             Notifier.post("Profile “\(name)” already exists")
             return nil
         }

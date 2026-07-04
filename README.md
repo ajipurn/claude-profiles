@@ -18,6 +18,7 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 
 - 🔁 **Instant account switching** — one click in the menu bar, ~5 seconds, no login screen
 - 🗂 **Shared session history** *(optional)* — all your accounts see one combined sidebar, so nothing "disappears" when you switch
+- ⌨️ **Claude Code (CLI) too** *(optional)* — one list for everything: each profile can be used for Desktop, for `claude` in the terminal, or both
 - ✏️ **Rename & delete profiles** — hover a profile in the panel; deleting a profile = logging that account out
 - 🚀 **Launch at login**, zero setup after the first run
 - 🔒 **Private by design** — no internet access, no analytics, and it never reads your passwords, cookies, or tokens. It only moves folders around on your Mac.
@@ -77,6 +78,17 @@ By default each account has its own sidebar history. Click **"Share Session Hist
 
 A timestamped backup of your history is saved in your home folder first (`claude-session-backup-…`), so this is safe to try.
 
+### Claude Code (CLI) profiles (optional)
+
+If you also use `claude` in the terminal, the same profiles can switch that account too:
+
+1. Click **"Set Up CLI Profiles…"** in the panel.
+2. Add the one line it shows you to the end of `~/.zshrc`, then open a new terminal.
+
+Every profile row now shows two small icons — a **window** (Claude Desktop) and a **terminal** (`claude` CLI). Orange means *active there*, grey means *set up there*, faint means *not used there yet*. Click an icon to use that profile in that context; the first time, it asks you to log in once (Desktop and CLI logins are separate systems, so this can't be skipped — but it's once, ever).
+
+CLI switching is **instant** — nothing quits — and applies to `claude` commands you start *from then on*; terminals already running keep their account, so switching can never interrupt work in progress. The **Default** row is your original `~/.claude` account, untouched — with all the settings and plugins you've built up there, which new CLI profiles don't inherit. Don't use it? Hover it and click the eye to hide the row (nothing is deleted; bring it back via the **?** button). Your own `CLAUDE_CONFIG_DIR` or aliases always take priority over the selection.
+
 ## FAQ
 
 **Why does macOS warn me the app might be malware?**
@@ -87,6 +99,9 @@ Everything stays on your Mac. The app is open source, makes zero network request
 
 **Why does logging in still work after switching?**
 Claude's login encryption key is stored per **app** in your Mac's Keychain, not per account. Every profile folder stays readable by the same Claude app.
+
+**How do CLI profiles work? Why does renaming warn about the CLI login?**
+Claude Code natively supports separate config folders (`CLAUDE_CONFIG_DIR`), each with its own isolated login. The app just maintains those folders and a tiny `claude` launcher script that picks the selected one — no symlinks, no restarts. Claude Code ties each folder's login to its *path*, so renaming a profile logs its CLI side out (the Desktop login is kept; you log the CLI in once again). Deleting a profile removes its data; a CLI login token stays in your Keychain until you remove it yourself (Keychain Access), because this app never touches Keychain items.
 
 **What does deleting a profile do?**
 It logs that account out by removing its saved login. You'd have to log in again next time. With shared history enabled, your session list survives.
@@ -109,6 +124,8 @@ The panel will warn you and switching to any profile fixes the link. Worst case:
 ## For developers
 
 Native Swift/SwiftUI, zero dependencies. `~/Library/Application Support/Claude` becomes a symlink into `Claude-Profiles/<name>/`; switching = quit Claude → repoint symlink → relaunch. Shared history merges the per-account session trees (`claude-code-sessions`, `local-agent-mode-sessions`) into `_shared-sessions/` and symlinks every `<account>/<org>` dir to the one with the most files. The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
+
+CLI profiles are plain `CLAUDE_CONFIG_DIR` dirs under `Claude-Profiles/_cli/profiles/`. A `/bin/sh` shim at `_cli/bin/claude` (prepended to PATH) reads the selected name from `_cli/active` at every launch and `exec`s the next `claude` on PATH — an already-exported `CLAUDE_CONFIG_DIR` wins, and macOS Keychain isolation per config dir is Claude Code's own behavior.
 
 ```sh
 swift run     # run from source (menu bar app, no bundle niceties)

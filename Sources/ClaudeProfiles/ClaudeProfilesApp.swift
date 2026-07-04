@@ -54,20 +54,51 @@ struct PanelView: View {
                     Banner(icon: "link.badge.plus",
                            text: "Active profile is missing — pick a profile to fix it")
                 }
-                SectionLabel("Profiles")
-                ForEach(state.profiles, id: \.self) { name in
+                HStack(spacing: 0) {
+                    SectionLabel("Profiles")
+                    Spacer(minLength: 0)
+                    if state.cliSetUp {
+                        IconButton(systemName: "questionmark.circle", help: "CLI terminal setup") {
+                            state.showCLIPathHelp()
+                        }
+                        .padding(.trailing, 6)
+                    }
+                }
+                if state.cliSetUp && !state.cliDefaultHidden {
+                    // The CLI's default account: plain ~/.claude, no Desktop side.
+                    ProfileRow(name: "Default",
+                               hasDesktop: false, hasCLI: true,
+                               desktopActive: false,
+                               cliActive: state.activeCLIProfile == nil,
+                               disabled: false,
+                               onDesktop: nil,
+                               onCLI: { state.switchCLI(nil) },
+                               onDelete: { state.hideDefaultRow() },
+                               deleteIcon: "eye.slash",
+                               deleteHelp: "Hide (nothing is deleted)")
+                }
+                ForEach(state.allProfiles, id: \.self) { name in
                     ProfileRow(
                         name: name,
-                        isActive: name == state.activeProfile,
+                        hasDesktop: state.profiles.contains(name),
+                        hasCLI: state.cliCreated.contains(name),
+                        desktopActive: name == state.activeProfile,
+                        cliActive: name == state.activeCLIProfile,
                         disabled: !state.claudeAppFound || state.isSwitching,
-                        onSwitch: { state.switchTo(name) },
+                        onDesktop: { state.switchTo(name) },
+                        onCLI: state.cliSetUp ? { state.switchCLI(name) } : nil,
                         onRename: { state.renameProfile(name) },
-                        onDelete: { state.deleteProfile(name) }
+                        onDelete: name == state.activeProfile ? nil : { state.deleteProfile(name) }
                     )
                 }
                 ActionRow(icon: "plus.circle.fill", title: "New Profile", tint: accent,
                           disabled: !state.claudeAppFound || state.isSwitching) {
                     state.newProfile()
+                }
+                if !state.cliSetUp {
+                    ActionRow(icon: "terminal", title: "Set Up CLI Profiles…") {
+                        state.setUpCLIProfiles()
+                    }
                 }
                 PanelDivider()
                 if !state.sharedHistoryEnabled {
@@ -94,53 +125,103 @@ struct PanelView: View {
 
 // MARK: - Rows
 
+/// One row per profile, tagged per context: the window icon is Claude Desktop,
+/// the terminal icon is claude CLI. Accent = active there, plain = set up there,
+/// faint = not used there yet (clicking creates it on demand).
 struct ProfileRow: View {
     let name: String
-    let isActive: Bool
+    let hasDesktop: Bool
+    let hasCLI: Bool
+    let desktopActive: Bool
+    let cliActive: Bool
     let disabled: Bool
-    let onSwitch: () -> Void
-    let onRename: () -> Void
-    let onDelete: () -> Void
+    let onDesktop: (() -> Void)?
+    let onCLI: (() -> Void)?
+    var onRename: (() -> Void)?
+    var onDelete: (() -> Void)?
+    var deleteIcon = "trash"
+    var deleteHelp = "Delete (logout)"
     @State private var hovering = false
+
+    private var anyActive: Bool { desktopActive || cliActive }
 
     var body: some View {
         HStack(spacing: 6) {
-            Button(action: { if !isActive { onSwitch() } }) {
+            // Row click keeps the old meaning: switch Desktop (or CLI for
+            // rows that have no Desktop side, like Default).
+            Button(action: { (onDesktop ?? onCLI)?() }) {
                 HStack(spacing: 8) {
-                    Avatar(name: name, active: isActive)
+                    Avatar(name: name, active: anyActive)
                     Text(name)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .foregroundStyle(.primary)
                     Spacer(minLength: 0)
-                    if isActive {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(accent)
-                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(PressableStyle())
-            .disabled(disabled || isActive)
+            .disabled(onDesktop != nil ? (disabled || desktopActive) : cliActive)
 
             if hovering && !disabled {
-                IconButton(systemName: "pencil", help: "Rename", action: onRename)
-                if !isActive {
-                    IconButton(systemName: "trash", help: "Delete (logout)", action: onDelete)
+                if let onRename {
+                    IconButton(systemName: "pencil", help: "Rename", action: onRename)
                 }
+                if let onDelete {
+                    IconButton(systemName: deleteIcon, help: deleteHelp, action: onDelete)
+                }
+            }
+            if let onDesktop {
+                ContextIcon(systemName: "macwindow",
+                            active: desktopActive, present: hasDesktop, disabled: disabled,
+                            help: desktopActive ? "Active in Claude Desktop"
+                                : hasDesktop ? "Use in Claude Desktop"
+                                : "Use in Claude Desktop (logs in once)",
+                            action: onDesktop)
+            }
+            if let onCLI {
+                ContextIcon(systemName: "terminal",
+                            active: cliActive, present: hasCLI, disabled: false,
+                            help: cliActive ? "Active for claude in the terminal"
+                                : hasCLI ? "Use for claude in the terminal — instant"
+                                : "Use for claude in the terminal (logs in once)",
+                            action: onCLI)
             }
         }
         .padding(.horizontal, 8)
         .frame(height: 32)
         .background(
             RoundedRectangle(cornerRadius: 7)
-                .fill(isActive ? accent.opacity(0.13)
+                .fill(anyActive ? accent.opacity(0.13)
                       : hovering ? Color.primary.opacity(0.06)
                       : .clear)
         )
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// The per-context tag + switch button on a profile row.
+struct ContextIcon: View {
+    let systemName: String
+    let active: Bool
+    let present: Bool
+    let disabled: Bool
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: active ? .semibold : .regular))
+                .foregroundStyle(active ? AnyShapeStyle(accent)
+                    : AnyShapeStyle(Color.secondary.opacity(present ? 0.9 : 0.35)))
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(active ? accent.opacity(0.15) : .clear))
+        }
+        .buttonStyle(PressableStyle())
+        .disabled(active || disabled)
+        .help(help)
     }
 }
 
