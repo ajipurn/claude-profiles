@@ -126,8 +126,9 @@ struct PanelView: View {
 // MARK: - Rows
 
 /// One row per profile, tagged per context: the window icon is Claude Desktop,
-/// the terminal icon is claude CLI. Accent = active there, plain = set up there,
-/// faint = not used there yet (clicking creates it on demand).
+/// the terminal icon is claude CLI. At rest a row shows only its *active* tags
+/// (accent); hovering reveals both switch buttons — same pattern as the
+/// rename/delete actions, so the list stays quiet.
 struct ProfileRow: View {
     let name: String
     let hasDesktop: Bool
@@ -143,15 +144,15 @@ struct ProfileRow: View {
     var deleteHelp = "Delete (logout)"
     @State private var hovering = false
 
-    private var anyActive: Bool { desktopActive || cliActive }
-
     var body: some View {
         HStack(spacing: 6) {
             // Row click keeps the old meaning: switch Desktop (or CLI for
             // rows that have no Desktop side, like Default).
             Button(action: { (onDesktop ?? onCLI)?() }) {
                 HStack(spacing: 8) {
-                    Avatar(name: name, active: anyActive)
+                    // Desktop is the row's primary identity — CLI-active alone
+                    // shows only the accent terminal tag, keeping hierarchy clear.
+                    Avatar(name: name, active: desktopActive)
                     Text(name)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -171,7 +172,7 @@ struct ProfileRow: View {
                     IconButton(systemName: deleteIcon, help: deleteHelp, action: onDelete)
                 }
             }
-            if let onDesktop {
+            if let onDesktop, desktopActive || (hovering && !disabled) {
                 ContextIcon(systemName: "macwindow",
                             active: desktopActive, present: hasDesktop, disabled: disabled,
                             help: desktopActive ? "Active in Claude Desktop"
@@ -179,7 +180,7 @@ struct ProfileRow: View {
                                 : "Use in Claude Desktop (logs in once)",
                             action: onDesktop)
             }
-            if let onCLI {
+            if let onCLI, cliActive || hovering {
                 ContextIcon(systemName: "terminal",
                             active: cliActive, present: hasCLI, disabled: false,
                             help: cliActive ? "Active for claude in the terminal"
@@ -192,7 +193,7 @@ struct ProfileRow: View {
         .frame(height: 32)
         .background(
             RoundedRectangle(cornerRadius: 7)
-                .fill(anyActive ? accent.opacity(0.13)
+                .fill(desktopActive ? accent.opacity(0.13)
                       : hovering ? Color.primary.opacity(0.06)
                       : .clear)
         )
@@ -209,18 +210,24 @@ struct ContextIcon: View {
     let disabled: Bool
     let help: String
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: active ? .semibold : .regular))
                 .foregroundStyle(active ? AnyShapeStyle(accent)
-                    : AnyShapeStyle(Color.secondary.opacity(present ? 0.9 : 0.35)))
+                    : hovering ? AnyShapeStyle(Color.primary)
+                    : AnyShapeStyle(Color.secondary.opacity(present ? 0.9 : 0.5)))
                 .frame(width: 20, height: 20)
-                .background(Circle().fill(active ? accent.opacity(0.15) : .clear))
+                .background(Circle().fill(active ? accent.opacity(0.15)
+                    : hovering ? Color.primary.opacity(0.1)
+                    : .clear))
         }
         .buttonStyle(PressableStyle())
         .disabled(active || disabled)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         .help(help)
     }
 }
