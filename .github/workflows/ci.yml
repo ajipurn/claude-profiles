@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen
+      # No signing cert in CI: build unsigned, then ad-hoc sign. Users already
+      # go through the quarantine flow per the README; Developer ID + notarization
+      # stays a manual release step until there's an Apple Developer account.
+      - run: >
+          xcodebuild -project ClaudeProfiles.xcodeproj -scheme ClaudeProfiles
+          -configuration Release -derivedDataPath build
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Package
+        run: |
+          mv "build/Build/Products/Release/ClaudeProfiles.app" "Claude Profiles.app"
+          codesign --force --deep --sign - "Claude Profiles.app"
+          ditto -c -k --keepParent "Claude Profiles.app" ClaudeProfiles.zip
+      - run: gh release create "$GITHUB_REF_NAME" ClaudeProfiles.zip --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
