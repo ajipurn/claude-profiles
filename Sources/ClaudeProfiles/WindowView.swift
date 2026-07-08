@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 import ClaudeProfilesCore
 
 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -11,62 +12,152 @@ let githubURL = URL(string: "https://github.com/ajipurn/claude-profiles")!
 struct WindowView: View {
     @ObservedObject var state: AppState
     @AppStorage("profileViewMode") private var viewMode = ViewMode.list
+    @State private var page = Page.profiles
     @State private var showAbout = false
 
     enum ViewMode: String { case list, grid }
+    enum Page { case profiles, settings }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if !state.claudeAppFound {
-                Banner(icon: "exclamationmark.triangle.fill",
-                       text: "Claude.app not found in /Applications or ~/Applications")
-            }
+        Group {
             switch state.mode {
             case .needsSetup:
-                SetupView(state: state)
-                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 14) {
+                    if !state.claudeAppFound {
+                        Banner(icon: "exclamationmark.triangle.fill",
+                               text: "Claude.app not found in /Applications or ~/Applications")
+                    }
+                    SetupView(state: state)
+                    Spacer(minLength: 0)
+                    footer
+                }
+                .padding(16)
             case .ready:
-                if state.brokenLink {
-                    Banner(icon: "link.badge.plus",
-                           text: "Active profile is missing — pick a profile to fix it")
+                VStack(spacing: 12) {
+                    HStack {
+                        Spacer()
+                        PillPicker(selection: $page, options: [
+                            (value: .profiles, title: "Profiles", icon: "person.2"),
+                            (value: .settings, title: "Settings", icon: "gearshape"),
+                        ])
+                        Spacer()
+                    }
+                    if page == .profiles { profilesPage } else { settingsPage }
                 }
-                profilesHeader
-                ScrollView {
-                    if viewMode == .list { profileList } else { profileGrid }
-                }
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.045)))
-                optionsSection
+                .padding(14)
             }
-            footer
         }
-        .padding(16)
         .frame(minWidth: 460, idealWidth: 520, maxWidth: .infinity,
                minHeight: 440, idealHeight: 660, maxHeight: .infinity)
         .onAppear { state.refresh() }
         .sheet(isPresented: $showAbout) { AboutView() }
     }
 
+    // MARK: Pages
+
+    private var profilesPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if !state.claudeAppFound {
+                Banner(icon: "exclamationmark.triangle.fill",
+                       text: "Claude.app not found in /Applications or ~/Applications")
+            }
+            if state.brokenLink {
+                Banner(icon: "link.badge.plus",
+                       text: "Active profile is missing — pick a profile to fix it")
+            }
+            profilesHeader
+            ScrollView {
+                if viewMode == .list { profileList } else { profileGrid }
+            }
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.045)))
+        }
+    }
+
+    private var settingsPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionLabel("Session History")
+                GroupBoxList {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Toggle("Share session history across profiles", isOn: sharedHistoryBinding)
+                            .toggleStyle(RaisedToggleStyle())
+                        Text("All profiles see one combined sidebar. Turning this off keeps a full copy in every profile; the copies then grow independently.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                }
+
+                SectionLabel("Claude Code (CLI)")
+                GroupBoxList {
+                    if !state.cliSetUp {
+                        ActionRow(icon: "terminal", title: "Set Up CLI Profiles…") {
+                            state.setUpCLIProfiles()
+                        }
+                    } else {
+                        Toggle("Show the Default (~/.claude) profile", isOn: defaultRowBinding)
+                            .toggleStyle(RaisedToggleStyle())
+                            .padding(.horizontal, 8)
+                            .frame(height: 30)
+                        ActionRow(icon: "questionmark.circle", title: "Terminal Setup Help…") {
+                            state.showCLIPathHelp()
+                        }
+                    }
+                }
+
+                SectionLabel("General")
+                GroupBoxList {
+                    LaunchAtLoginToggle()
+                        .padding(.horizontal, 8)
+                        .frame(height: 30)
+                    ActionRow(icon: "folder", title: "Reveal Profiles in Finder") {
+                        state.revealProfilesFolder()
+                    }
+                }
+
+                SectionLabel("About")
+                GroupBoxList {
+                    HStack {
+                        Text("Version").foregroundStyle(.primary)
+                        Spacer()
+                        Text(appVersion).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 30)
+                    ActionRow(icon: "info.circle", title: "About & Updates…") {
+                        showAbout = true
+                    }
+                }
+            }
+        }
+    }
+
+    private var sharedHistoryBinding: Binding<Bool> {
+        Binding(get: { state.sharedHistoryEnabled },
+                set: { $0 ? state.enableSharedHistory() : state.disableSharedHistory() })
+    }
+
+    private var defaultRowBinding: Binding<Bool> {
+        Binding(get: { !state.cliDefaultHidden },
+                set: { state.setDefaultRowHidden(!$0) })
+    }
+
     private var profilesHeader: some View {
         HStack(spacing: 8) {
             SectionLabel("Profiles · \(state.allProfiles.count)")
             Spacer()
-            Picker("View", selection: $viewMode) {
-                Image(systemName: "list.bullet").tag(ViewMode.list)
-                    .help("List view")
-                Image(systemName: "square.grid.2x2").tag(ViewMode.grid)
-                    .help("Grid view")
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 70)
+            PillPicker(selection: $viewMode, options: [
+                (value: .list, title: "", icon: "list.bullet"),
+                (value: .grid, title: "", icon: "square.grid.2x2"),
+            ])
             Button {
                 state.newProfile()
             } label: {
                 Label("New Profile", systemImage: "plus")
-                    .font(.system(size: 11, weight: .medium))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(RaisedPillButtonStyle())
             .disabled(!state.claudeAppFound || state.isSwitching)
         }
     }
@@ -120,7 +211,8 @@ struct WindowView: View {
                                   onDesktop: nil,
                                   onCLI: { state.switchCLI(nil) },
                                   onDelete: { state.hideDefaultRow() },
-                                  deleteLabel: "Hide")
+                                  deleteLabel: "Hide (nothing is deleted)",
+                                  deleteIcon: "eye.slash")
             }
             ForEach(state.allProfiles, id: \.self) { name in
                 WindowProfileCard(
@@ -140,53 +232,6 @@ struct WindowView: View {
         .padding(8)
     }
 
-    // MARK: Options
-
-    private var optionsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel("Options")
-            GroupBoxList {
-                if !state.sharedHistoryEnabled {
-                    ActionRow(icon: "clock.arrow.2.circlepath", title: "Share Session History…",
-                              disabled: !state.claudeAppFound || state.isSwitching) {
-                        state.enableSharedHistory()
-                    }
-                } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "clock.arrow.2.circlepath")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.secondary)
-                            .frame(width: 18)
-                        Text("Session history is shared across profiles")
-                            .foregroundStyle(.primary)
-                        Spacer(minLength: 0)
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(accent)
-                    }
-                    .padding(.horizontal, 8)
-                    .frame(height: 30)
-                }
-                if !state.cliSetUp {
-                    ActionRow(icon: "terminal", title: "Set Up CLI Profiles…") {
-                        state.setUpCLIProfiles()
-                    }
-                } else {
-                    ActionRow(icon: "questionmark.circle", title: "CLI Terminal Setup…") {
-                        state.showCLIPathHelp()
-                    }
-                }
-                LaunchAtLoginRow()
-                ActionRow(icon: "folder", title: "Reveal Profiles in Finder") {
-                    state.revealProfilesFolder()
-                }
-                ActionRow(icon: "info.circle", title: "About & Updates…") {
-                    showAbout = true
-                }
-            }
-        }
-    }
-
     private var footer: some View {
         HStack {
             Spacer()
@@ -195,6 +240,122 @@ struct WindowView: View {
                 .foregroundStyle(.tertiary)
             Spacer()
         }
+    }
+}
+
+/// Pill segmented control: quiet capsule track, the selected segment is a
+/// raised white pill (soft shadow) that slides between options.
+struct PillPicker<T: Hashable>: View {
+    @Binding var selection: T
+    let options: [(value: T, title: String, icon: String?)]
+    @Namespace private var ns
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.value) { option in
+                let selected = selection == option.value
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { selection = option.value }
+                } label: {
+                    HStack(spacing: 5) {
+                        if let icon = option.icon {
+                            Image(systemName: icon)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        if !option.title.isEmpty {
+                            Text(option.title)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    // Weight stays constant so segment widths never shift while
+                    // the pill slides — selection reads from color + the pill.
+                    .foregroundStyle(selected ? Color.primary : Color.secondary)
+                    .padding(.horizontal, option.title.isEmpty ? 9 : 12)
+                    .frame(height: 24)
+                    .background {
+                        if selected {
+                            Capsule()
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.16), radius: 2, y: 1)
+                                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+                                .matchedGeometryEffect(id: "pill", in: ns)
+                        }
+                    }
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(PressableStyle())
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(Color.primary.opacity(0.055)))
+    }
+}
+
+/// Button as a raised pill — same body as PillPicker's selected segment.
+struct RaisedPillButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(isEnabled ? Color.primary : Color.secondary)
+            .padding(.horizontal, 13)
+            // 30 = PillPicker's outer height (24 segment + 3 track padding × 2),
+            // so the button sits flush with pickers on the same row.
+            .frame(height: 30)
+            .background(
+                Capsule()
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .shadow(color: .black.opacity(isEnabled ? 0.16 : 0.06), radius: 2, y: 1)
+                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+            )
+            .contentShape(Capsule())
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Switch with a raised knob, matching the pill tabs. Track uses the app
+/// accent when on — not iOS blue — so the window stays one visual family.
+struct RaisedToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.label
+                .foregroundStyle(.primary)
+            Spacer(minLength: 8)
+            Capsule()
+                .fill(configuration.isOn ? accent : Color.primary.opacity(0.18))
+                .frame(width: 36, height: 21)
+                .overlay(
+                    Circle()
+                        .fill(.white)
+                        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+                        .padding(2.5)
+                        .offset(x: configuration.isOn ? 7.5 : -7.5)
+                )
+                .onTapGesture {
+                    withAnimation(.easeOut(duration: 0.15)) { configuration.isOn.toggle() }
+                }
+        }
+    }
+}
+
+/// Same SMAppService logic as the panel's LaunchAtLoginRow, styled for Settings.
+struct LaunchAtLoginToggle: View {
+    @State private var enabled = SMAppService.mainApp.status == .enabled
+
+    var body: some View {
+        Toggle("Launch at login", isOn: $enabled)
+            .toggleStyle(RaisedToggleStyle())
+            .onChange(of: enabled) { on in
+                do {
+                    if on { try SMAppService.mainApp.register() }
+                    else { try SMAppService.mainApp.unregister() }
+                } catch {
+                    NSLog("[Claude Profiles] Launch at login failed: %@", error.localizedDescription)
+                    enabled = SMAppService.mainApp.status == .enabled
+                }
+            }
     }
 }
 
@@ -302,6 +463,7 @@ struct WindowProfileCard: View {
     var onRename: (() -> Void)?
     var onDelete: (() -> Void)?
     var deleteLabel = "Delete (logout)…"
+    var deleteIcon = "trash"
     @State private var hovering = false
 
     var body: some View {
@@ -345,6 +507,20 @@ struct WindowProfileCard: View {
                 .strokeBorder(desktopActive ? accent.opacity(0.4) : Color.primary.opacity(0.06))
         )
         .contentShape(Rectangle())
+        // Same hover-reveal as list rows; the context menu stays as a second path.
+        .overlay(alignment: .topTrailing) {
+            if hovering && !disabled {
+                HStack(spacing: 2) {
+                    if let onRename {
+                        IconButton(systemName: "pencil", help: "Rename", action: onRename)
+                    }
+                    if let onDelete {
+                        IconButton(systemName: deleteIcon, help: deleteLabel, action: onDelete)
+                    }
+                }
+                .padding(3)
+            }
+        }
         .contextMenu {
             if let onRename { Button("Rename…", action: onRename) }
             if let onDelete { Button(deleteLabel, action: onDelete) }
