@@ -284,6 +284,15 @@ public final class ProfileManager {
         return created
     }
 
+    /// True once Claude has written the profile's account/org ids — i.e. the
+    /// account has completed its first login. Before that, prelinking is
+    /// impossible (the ids are unknowable), which is why a brand-new profile's
+    /// sidebar starts empty even with shared history on.
+    public func hasAccountIDs(profile name: String) -> Bool {
+        let dir = profilesDir.appendingPathComponent(name)
+        return accountID(of: dir) != nil && !orgIDs(of: dir).isEmpty
+    }
+
     /// ownerAccountId from cowork-enabled-cli-ops.json — written on login.
     private func accountID(of profileDir: URL) -> String? {
         guard let data = try? Data(contentsOf: profileDir.appendingPathComponent("cowork-enabled-cli-ops.json")),

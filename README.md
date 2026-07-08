@@ -68,9 +68,9 @@ After that, a <img src="docs/icon.png" width="14"> person icon appears in your m
 3. **Switch** by clicking any profile in the list. The first switch to a new profile shows
    Claude's login screen — log in with the other account. That's the **only** time you'll
    ever log into it. After that, switching is instant and login-free.
-4. *(Shared history only)* Right after that first login, quit and reopen Claude once —
-   its sidebar loads at startup, so the freshly linked combined history needs one reload.
-   The app reminds you with a notification when this is needed.
+4. *(Shared history only)* Claude loads its sidebar at startup, so a freshly logged-in
+   account needs one reload to see the combined history. The app detects the login and
+   offers to restart Claude for you — one click, done.
 
 ### Sharing your session history (optional, recommended)
 

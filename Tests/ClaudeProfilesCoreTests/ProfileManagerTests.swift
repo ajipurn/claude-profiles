@@ -329,6 +329,16 @@ final class ProfileManagerTests: XCTestCase {
         )
     }
 
+    func testHasAccountIDsRequiresBothLoginFiles() throws {
+        let org = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        try write("x", to: profile("p").appendingPathComponent("placeholder"))
+        XCTAssertFalse(pm.hasAccountIDs(profile: "p"))
+        try write(#"{"ownerAccountId":"acct"}"#, to: profile("p").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        XCTAssertFalse(pm.hasAccountIDs(profile: "p"), "needs org ids too")
+        try write(#"{"dxt:desk:\#(org)":1}"#, to: profile("p").appendingPathComponent("config.json"))
+        XCTAssertTrue(pm.hasAccountIDs(profile: "p"))
+    }
+
     func testDisableSharedHistoryGivesEachProfileACopy() throws {
         let code = ProfileManager.sessionTrees[0]
         let orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

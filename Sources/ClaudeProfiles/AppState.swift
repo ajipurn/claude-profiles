@@ -115,6 +115,57 @@ final class AppState: ObservableObject {
                 Notifier.post("Switch failed", error.localizedDescription)
             }
             self.claude.relaunch()
+            // A profile that has never logged in can't be prelinked yet (its
+            // account/org ids don't exist until Claude writes them at login) —
+            // watch for the ids so the combined sidebar needs no detour.
+            if self.sharedHistoryEnabled, !self.manager.hasAccountIDs(profile: name) {
+                self.watchForFirstLogin(of: name)
+            }
+        }
+    }
+
+    // MARK: - First-login watcher
+
+    private var loginWatcher: Timer?
+
+    /// Polls the active profile until Claude writes its login ids, then links
+    /// its org dir into the shared tree and offers the one restart Claude
+    /// needs to load the combined sidebar. Ends on switch-away or after ~15 min.
+    private func watchForFirstLogin(of name: String) {
+        loginWatcher?.invalidate()
+        var ticks = 0
+        loginWatcher = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] timer in
+            Task { @MainActor [weak self] in
+                guard let self else { timer.invalidate(); return }
+                ticks += 1
+                guard ticks <= 300, self.manager.activeProfile() == name else {
+                    timer.invalidate()
+                    return
+                }
+                guard self.manager.hasAccountIDs(profile: name) else { return }
+                timer.invalidate()
+                let linked = (try? self.manager.prelinkKnownAccounts()) ?? 0
+                if linked > 0 { self.offerHistoryRestart(name) }
+            }
+        }
+    }
+
+    private func offerHistoryRestart(_ name: String) {
+        let alert = NSAlert()
+        alert.messageText = "Load the shared history?"
+        alert.informativeText = "“\(name)” just logged in. Claude loads its sidebar at startup, "
+            + "so one quick restart is needed to show the combined session list."
+        alert.addButton(withTitle: "Restart Claude")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            Notifier.post("Session history linked",
+                          "Quit and reopen Claude whenever you like to see the combined list.")
+            return
+        }
+        run {
+            guard await self.claude.quit() else { return self.abortQuitFailed() }
+            self.claude.relaunch()
         }
     }
 
