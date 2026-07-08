@@ -30,9 +30,9 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 
 ## Install
 
-1. Download `ClaudeProfiles.zip` from the [latest release](../../releases/latest).
-2. Unzip it and drag **Claude Profiles.app** into your **Applications** folder.
-3. Open it once — macOS will show a warning. **This is expected**, see below.
+1. Download `ClaudeProfiles.dmg` from the [latest release](../../releases/latest).
+2. Open it and drag **Claude Profiles** onto the **Applications** shortcut next to it.
+3. Open the app once — macOS will show a warning. **This is expected**, see below.
 
 ### "Apple could not verify this app is free of malware…"
 

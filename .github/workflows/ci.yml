@@ -30,11 +30,14 @@ jobs:
           xcodebuild -project ClaudeProfiles.xcodeproj -scheme ClaudeProfiles
           -configuration Release -derivedDataPath build
           CODE_SIGNING_ALLOWED=NO build
-      - name: Package
+      - name: Package as DMG
         run: |
           mv "build/Build/Products/Release/ClaudeProfiles.app" "Claude Profiles.app"
           codesign --force --deep --sign - "Claude Profiles.app"
-          ditto -c -k --keepParent "Claude Profiles.app" ClaudeProfiles.zip
-      - run: gh release create "$GITHUB_REF_NAME" ClaudeProfiles.zip --generate-notes
+          mkdir dmg
+          mv "Claude Profiles.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Claude Profiles" -srcfolder dmg -ov -format UDZO ClaudeProfiles.dmg
+      - run: gh release create "$GITHUB_REF_NAME" ClaudeProfiles.dmg --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
