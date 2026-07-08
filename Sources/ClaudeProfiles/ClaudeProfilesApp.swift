@@ -30,8 +30,26 @@ struct ClaudeProfilesApp: App {
             } else {
                 Image(systemName: "person.crop.circle") // `swift run` has no bundle resources
             }
+            // Which account is active, at a glance — same 2-letter initial as
+            // the panel's Avatar, so the two stay recognizably one identity.
+            if !state.isSwitching, state.mode == .ready, let active = state.activeProfile {
+                Text(Avatar.initials(active))
+            }
         }
         .menuBarExtraStyle(.window)
+
+        // Same panel as a regular window. The app stays a menu bar accessory;
+        // the Dock icon exists only while this window is open.
+        Window("Claude Profiles", id: "main") {
+            WindowView(state: state)
+                .onAppear {
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .onDisappear { NSApp.setActivationPolicy(.accessory) }
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 520, height: 660)
     }
 }
 
@@ -39,6 +57,7 @@ struct ClaudeProfilesApp: App {
 
 struct PanelView: View {
     @ObservedObject var state: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -110,6 +129,9 @@ struct PanelView: View {
                 LaunchAtLoginRow()
                 ActionRow(icon: "folder", title: "Reveal Profiles in Finder") {
                     state.revealProfilesFolder()
+                }
+                ActionRow(icon: "macwindow.on.rectangle", title: "Open as Window") {
+                    openWindow(id: "main")
                 }
             }
             PanelDivider()
@@ -297,6 +319,15 @@ struct LaunchAtLoginRow: View {
 struct Avatar: View {
     let name: String
     let active: Bool
+    var size: CGFloat = 18
+
+    /// Letters first: "008-purenomo" → "PU", not the "00" every numbered
+    /// profile shares. Digits only when the name has no letters at all.
+    static func initials(_ name: String) -> String {
+        let letters = name.filter(\.isLetter)
+        let source = letters.isEmpty ? name.filter(\.isNumber) : letters
+        return String((source.isEmpty ? name : source).prefix(2)).uppercased()
+    }
 
     private var hue: Double {
         Double(name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % 360) / 360
@@ -310,11 +341,11 @@ struct Avatar: View {
                                                startPoint: .top, endPoint: .bottom))
                 : AnyShapeStyle(Color(hue: hue, saturation: 0.35, brightness: 0.75).opacity(0.85))
             )
-            Text(String(name.prefix(2)).uppercased())
-                .font(.system(size: 8, weight: .bold))
+            Text(Self.initials(name))
+                .font(.system(size: size * 0.44, weight: .bold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 18, height: 18)
+        .frame(width: size, height: size)
     }
 }
 
