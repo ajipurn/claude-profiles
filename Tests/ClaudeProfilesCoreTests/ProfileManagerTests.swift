@@ -329,6 +329,37 @@ final class ProfileManagerTests: XCTestCase {
         )
     }
 
+    func testDisableSharedHistoryGivesEachProfileACopy() throws {
+        let code = ProfileManager.sessionTrees[0]
+        let orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let orgB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        try write("a1", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/one.json"))
+        try write("a2", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/two.json"))
+        try write("b1", to: profile("b").appendingPathComponent("\(code)/acctB/\(orgB)/three.json"))
+        try write(#"{"ownerAccountId":"acctA"}"#, to: profile("a").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"ownerAccountId":"acctB"}"#, to: profile("b").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:desk:\#(orgA)":1}"#, to: profile("a").appendingPathComponent("config.json"))
+        try write(#"{"dxt:desk:\#(orgB)":1}"#, to: profile("b").appendingPathComponent("config.json"))
+
+        try pm.enableSharedHistory()
+        try pm.disableSharedHistory()
+
+        XCTAssertFalse(pm.sharedHistoryEnabled)
+        XCTAssertFalse(fm.fileExists(atPath: pm.sharedDir.path), "shared dir must be removed")
+        // Both profiles own real trees again — with the full combined copy
+        // under their own account/org ids, not links into the removed dir.
+        for (p, acct, org) in [("a", "acctA", orgA), ("b", "acctB", orgB)] {
+            let tree = profile(p).appendingPathComponent(code)
+            XCTAssertTrue(isRealDir(tree), "\(p)'s tree should be a real directory")
+            let orgDir = tree.appendingPathComponent("\(acct)/\(org)")
+            XCTAssertFalse(isSymlink(orgDir))
+            for f in ["one.json", "two.json", "three.json"] {
+                XCTAssertTrue(fm.fileExists(atPath: orgDir.appendingPathComponent(f).path),
+                              "\(p) should keep \(f)")
+            }
+        }
+    }
+
     func testRerunLinksAccountThatLoggedInAfterEnable() throws {
         try seedTwoProfiles()
         try pm.enableSharedHistory()

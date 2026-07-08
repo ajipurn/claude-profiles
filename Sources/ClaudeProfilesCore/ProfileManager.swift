@@ -208,6 +208,36 @@ public final class ProfileManager {
         return backup
     }
 
+    /// Undo sharing. Merged sessions cannot be split back per account, so the
+    /// honest semantics are: every profile keeps its own real copy of the
+    /// combined history (for the account/org ids Claude recorded at login),
+    /// and sessions created afterwards stay per-profile. Only touches links —
+    /// a profile whose tree is still a real directory is left alone.
+    public func disableSharedHistory() throws {
+        guard sharedHistoryEnabled else { return }
+        let names = profiles()
+        for tree in Self.sessionTrees {
+            let sharedTree = sharedDir.appendingPathComponent(tree)
+            for profile in names {
+                let profileDir = profilesDir.appendingPathComponent(profile)
+                let link = profileDir.appendingPathComponent(tree)
+                guard isSymlink(link) else { continue }
+                try fm.removeItem(at: link)
+                try fm.createDirectory(at: link, withIntermediateDirectories: true)
+                guard isRealDirectory(sharedTree), let account = accountID(of: profileDir) else { continue }
+                for org in orgIDs(of: profileDir) {
+                    let src = sharedTree.appendingPathComponent(account).appendingPathComponent(org)
+                        .resolvingSymlinksInPath()
+                    let dst = link.appendingPathComponent(account).appendingPathComponent(org)
+                    guard isRealDirectory(src), !itemExists(dst) else { continue }
+                    try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.copyItem(at: src, to: dst)
+                }
+            }
+        }
+        try fm.removeItem(at: sharedDir)
+    }
+
     /// Safe while Claude is running: only creates missing symlinks — never merges,
     /// moves, or deletes. Lets an account that just logged in join the combined
     /// list without waiting for a full quit-time merge.

@@ -230,7 +230,8 @@ final class AppState: ObservableObject {
         alert.addButton(withTitle: "Merge & Share")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // refresh() on cancel snaps the Settings toggle back to reality.
+        guard alert.runModal() == .alertFirstButtonReturn else { refresh(); return }
         run {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
             do {
@@ -243,6 +244,38 @@ final class AppState: ObservableObject {
                 Notifier.post("Sharing failed", error.localizedDescription)
             }
         }
+    }
+
+    /// The reverse of sharing: every profile keeps a copy of the combined
+    /// history, new sessions stay per-profile. Needs Claude down, like enable.
+    func disableSharedHistory() {
+        let alert = NSAlert()
+        alert.messageText = "Stop sharing session history?"
+        alert.informativeText = "Every profile keeps its own copy of the combined history — nothing is lost, "
+            + "but the copies grow independently from now on. Claude will restart."
+        alert.addButton(withTitle: "Stop Sharing")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { refresh(); return }
+        run {
+            guard await self.claude.quit() else { return self.abortQuitFailed() }
+            do {
+                try self.manager.disableSharedHistory()
+                self.claude.relaunch()
+                Notifier.post("Shared history disabled", "Each profile now has its own copy.")
+            } catch {
+                self.claude.relaunch()
+                Notifier.post("Disabling failed", error.localizedDescription)
+            }
+        }
+    }
+
+    /// Toggle in Settings — no alert: a labeled toggle explains itself,
+    /// and it is UI-only (nothing is deleted either way).
+    func setDefaultRowHidden(_ hidden: Bool) {
+        do { try cli.setDefaultHidden(hidden) }
+        catch { Notifier.post("Could not update", error.localizedDescription) }
+        refresh()
     }
 
     func revealProfilesFolder() {
