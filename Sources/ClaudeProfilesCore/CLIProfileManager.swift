@@ -18,6 +18,7 @@ public final class CLIProfileManager {
     public var cliDir: URL { home.appendingPathComponent("Library/Application Support/Claude-Profiles/_cli") }
     public var profilesDir: URL { cliDir.appendingPathComponent("profiles") }
     public var shim: URL { cliDir.appendingPathComponent("bin/claude") }
+    public var profileTool: URL { cliDir.appendingPathComponent("bin/claude-profile") }
     private var activeFile: URL { cliDir.appendingPathComponent("active") }
 
     /// The one line the user adds to ~/.zshrc. Prepending keeps the shim ahead
@@ -103,12 +104,14 @@ public final class CLIProfileManager {
         try fm.removeItem(at: dir)
     }
 
-    /// Idempotent: safe to re-run, always writes the current script.
+    /// Idempotent: safe to re-run, always writes the current scripts.
     public func installShim() throws {
         try fm.createDirectory(at: shim.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fm.createDirectory(at: profilesDir, withIntermediateDirectories: true)
         try Self.shimScript.write(to: shim, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+        try Self.profileToolScript.write(to: profileTool, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: profileTool.path)
     }
 
     private func isDirectory(_ url: URL) -> Bool {
@@ -138,5 +141,50 @@ public final class CLIProfileManager {
     done
     echo "claude (Claude Profiles shim): real claude not found in PATH" >&2
     exit 127
+    """
+
+    static let profileToolScript = """
+    #!/bin/sh
+    # Claude Profiles — switch the profile `claude` uses, from the terminal.
+    # Same effect as clicking a terminal icon in the menu bar app: rewrites
+    # _cli/active, which the `claude` shim reads at every launch. Applies to
+    # claude commands started from now on, never to ones already running.
+    base="$HOME/Library/Application Support/Claude-Profiles/_cli"
+    case "${1:-}" in
+    "")
+        name=""
+        if [ -f "$base/active" ]; then IFS= read -r name < "$base/active"; fi
+        if [ -n "$name" ] && [ -d "$base/profiles/$name" ]; then
+            echo "$name"
+        else
+            echo "default"
+        fi
+        ;;
+    # `list`/`help` shadow profiles with those exact names — switch those in the app.
+    list|-l|--list)
+        echo "default"
+        ls "$base/profiles" 2>/dev/null
+        ;;
+    help|-h|--help)
+        echo "usage: claude-profile           show the active CLI profile"
+        echo "       claude-profile <name>    switch to <name> (new claude runs only)"
+        echo "       claude-profile default   back to the plain ~/.claude account"
+        echo "       claude-profile list      list available profiles"
+        ;;
+    *)
+        # A real profile dir wins over the `default` keyword.
+        if [ -d "$base/profiles/$1" ]; then
+            printf '%s\\n' "$1" > "$base/active"
+            echo "CLI profile: $1 — applies to claude commands started from now on"
+        elif [ "$1" = "default" ]; then
+            rm -f "$base/active"
+            echo "CLI profile: default (~/.claude) — applies to claude commands started from now on"
+        else
+            echo "claude-profile: no profile named '$1'" >&2
+            { echo "profiles:"; echo "  default"; ls "$base/profiles" 2>/dev/null | sed 's/^/  /'; } >&2
+            exit 1
+        fi
+        ;;
+    esac
     """
 }

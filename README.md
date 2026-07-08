@@ -87,7 +87,16 @@ If you also use `claude` in the terminal, the same profiles can switch that acco
 
 Every profile row now shows two small icons — a **window** (Claude Desktop) and a **terminal** (`claude` CLI). Orange means *active there*, grey means *set up there*, faint means *not used there yet*. Click an icon to use that profile in that context; the first time, it asks you to log in once (Desktop and CLI logins are separate systems, so this can't be skipped — but it's once, ever).
 
-CLI switching is **instant** — nothing quits — and applies to `claude` commands you start *from then on*; terminals already running keep their account, so switching can never interrupt work in progress. The **Default** row is your original `~/.claude` account, untouched — with all the settings and plugins you've built up there, which new CLI profiles don't inherit. Don't use it? Hover it and click the eye to hide the row (nothing is deleted; bring it back via the **?** button). Your own `CLAUDE_CONFIG_DIR` or aliases always take priority over the selection.
+CLI switching is **instant** — nothing quits — and applies to `claude` commands you start *from then on*; terminals already running keep their account, so switching can never interrupt work in progress. It also works without leaving the terminal — handy for scripts, Raycast, or Alfred:
+
+```sh
+claude-profile work      # switch (new claude runs only)
+claude-profile           # show the active profile
+claude-profile list      # list profiles
+claude-profile default   # back to plain ~/.claude
+```
+
+The **Default** row is your original `~/.claude` account, untouched — with all the settings and plugins you've built up there, which new CLI profiles don't inherit. Don't use it? Hover it and click the eye to hide the row (nothing is deleted; bring it back via the **?** button). Your own `CLAUDE_CONFIG_DIR` or aliases always take priority over the selection.
 
 ## FAQ
 
@@ -125,7 +134,7 @@ The panel will warn you and switching to any profile fixes the link. Worst case:
 
 Native Swift/SwiftUI, zero dependencies. `~/Library/Application Support/Claude` becomes a symlink into `Claude-Profiles/<name>/`; switching = quit Claude → repoint symlink → relaunch. Shared history merges the per-account session trees (`claude-code-sessions`, `local-agent-mode-sessions`) into `_shared-sessions/` and symlinks every `<account>/<org>` dir to the one with the most files. The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
 
-CLI profiles are plain `CLAUDE_CONFIG_DIR` dirs under `Claude-Profiles/_cli/profiles/`. A `/bin/sh` shim at `_cli/bin/claude` (prepended to PATH) reads the selected name from `_cli/active` at every launch and `exec`s the next `claude` on PATH — an already-exported `CLAUDE_CONFIG_DIR` wins, and macOS Keychain isolation per config dir is Claude Code's own behavior.
+CLI profiles are plain `CLAUDE_CONFIG_DIR` dirs under `Claude-Profiles/_cli/profiles/`. A `/bin/sh` shim at `_cli/bin/claude` (prepended to PATH) reads the selected name from `_cli/active` at every launch and `exec`s the next `claude` on PATH — an already-exported `CLAUDE_CONFIG_DIR` wins, and macOS Keychain isolation per config dir is Claude Code's own behavior. `_cli/bin/claude-profile` is a second tiny script that rewrites `_cli/active` from the terminal; both are rewritten at every app launch, so they stay current after updates.
 
 ```sh
 swift run     # run from source (menu bar app, no bundle niceties)

@@ -26,6 +26,9 @@ final class AppState: ObservableObject {
 
     init() {
         refresh()
+        // Scripts in _cli/bin were written by whichever app version ran setup;
+        // rewriting them at launch keeps older installs current (idempotent).
+        if cli.isSetUp { try? cli.installShim() }
         // A new account's session dirs join the combined list only when the merge
         // re-runs, and that is only safe while Claude is not running. Besides the
         // switch flow, catch the two other moments Claude is known to be down:

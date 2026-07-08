@@ -30,6 +30,32 @@ final class CLIProfileManagerTests: XCTestCase {
         let script = try String(contentsOf: cli.shim, encoding: .utf8)
         XCTAssertTrue(script.hasPrefix("#!/bin/sh"))
         XCTAssertTrue(script.contains("CLAUDE_CONFIG_DIR"))
+        XCTAssertTrue(fm.isExecutableFile(atPath: cli.profileTool.path))
+        XCTAssertTrue(try String(contentsOf: cli.profileTool, encoding: .utf8).hasPrefix("#!/bin/sh"))
+    }
+
+    /// The claude-profile script must agree with CLIProfileManager about the
+    /// active-file format: names it writes are names the manager reads back.
+    func testProfileToolScriptRoundTripsWithManager() throws {
+        try cli.installShim()
+        try cli.createProfile(name: "work")
+
+        func run(_ args: [String]) throws -> Int32 {
+            let p = Process()
+            p.executableURL = cli.profileTool
+            p.arguments = args
+            p.environment = ["HOME": home.path]
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            try p.run(); p.waitUntilExit()
+            return p.terminationStatus
+        }
+
+        XCTAssertEqual(try run(["work"]), 0)
+        XCTAssertEqual(cli.activeProfile(), "work")
+        XCTAssertEqual(try run(["default"]), 0)
+        XCTAssertNil(cli.activeProfile())
+        XCTAssertNotEqual(try run(["ghost"]), 0)
+        XCTAssertNil(cli.activeProfile()) // failed switch changes nothing
     }
 
     func testCreateListSwitchDelete() throws {
