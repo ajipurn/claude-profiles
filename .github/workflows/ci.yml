@@ -21,21 +21,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - run: brew install xcodegen
-      - run: xcodegen
-      # No signing cert in CI: build unsigned, then ad-hoc sign. Users already
-      # go through the quarantine flow per the README; Developer ID + notarization
-      # stays a manual release step until there's an Apple Developer account.
-      - run: >
-          xcodebuild -project ClaudeProfiles.xcodeproj -scheme ClaudeProfiles
-          -configuration Release -derivedDataPath build
-          CODE_SIGNING_ALLOWED=NO build
+      # SwiftPM build + hand-assembled, ad-hoc signed bundle — same script as
+      # local builds. The xcodegen project is for editing in Xcode only; its
+      # single-target layout cannot resolve the ClaudeProfilesCore module.
+      - name: Build app bundle
+        run: sh scripts/make-app.sh "${GITHUB_REF_NAME#v}" "${{ github.run_number }}"
       - name: Package as DMG
         run: |
-          mv "build/Build/Products/Release/ClaudeProfiles.app" "Claude Profiles.app"
-          codesign --force --deep --sign - "Claude Profiles.app"
           mkdir dmg
-          mv "Claude Profiles.app" dmg/
+          mv "dist/Claude Profiles.app" dmg/
           ln -s /Applications dmg/Applications
           hdiutil create -volname "Claude Profiles" -srcfolder dmg -ov -format UDZO ClaudeProfiles.dmg
       - run: gh release create "$GITHUB_REF_NAME" ClaudeProfiles.dmg --generate-notes

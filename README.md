@@ -144,10 +144,12 @@ swift test    # unit tests — needs full Xcode (XCTest isn't in the CLI tools)
 ### App bundle
 
 ```sh
-brew install xcodegen
-xcodegen                      # generates ClaudeProfiles.xcodeproj (LSUIElement, hardened runtime)
-xcodebuild -project ClaudeProfiles.xcodeproj -scheme ClaudeProfiles -configuration Release build
+sh scripts/make-app.sh        # → dist/Claude Profiles.app (works with just Command Line Tools)
 ```
+
+This is the same script CI uses for releases: SwiftPM build plus a hand-assembled,
+ad-hoc signed bundle — no Xcode needed. (`xcodegen` still generates a project for
+editing in Xcode, but its single-target layout can't build the app.)
 
 App Sandbox is off on purpose — the app manages another app's data directory and lifecycle, which the sandbox forbids. Direct distribution only (no Mac App Store).
 
