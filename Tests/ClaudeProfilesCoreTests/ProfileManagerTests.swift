@@ -469,4 +469,20 @@ final class ProfileManagerTests: XCTestCase {
             ["local_1.json", "local_2.json", "local_3.json"]
         )
     }
+
+    // MARK: - Display order
+
+    func testOrderedRespectsSavedOrderAndPutsUnknownNamesLast() throws {
+        try pm.saveOrder(["charlie", "alpha"])
+        // charlie/alpha follow the saved order; bravo/delta are unknown, so they
+        // sort to the end alphabetically. round-trips through the file on disk.
+        XCTAssertEqual(pm.savedOrder(), ["charlie", "alpha"])
+        XCTAssertEqual(
+            pm.ordered(["alpha", "bravo", "charlie", "delta"]),
+            ["charlie", "alpha", "bravo", "delta"]
+        )
+        // No file yet on a fresh manager → pure alphabetical.
+        let fresh = ProfileManager(home: fm.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        XCTAssertEqual(fresh.ordered(["b", "a"]), ["a", "b"])
+    }
 }

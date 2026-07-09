@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import UniformTypeIdentifiers
 import ClaudeProfilesCore
 
 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -14,6 +15,7 @@ struct WindowView: View {
     @AppStorage("profileViewMode") private var viewMode = ViewMode.list
     @State private var page = Page.profiles
     @State private var showAbout = false
+    @State private var dragging: String?   // profile being drag-reordered
 
     enum ViewMode: String { case list, grid }
     enum Page { case profiles, settings }
@@ -165,6 +167,8 @@ struct WindowView: View {
     // MARK: Profiles — list
 
     private var profileList: some View {
+        // Drag-reorder via .onDrag + a DropDelegate — macOS List.onMove is too
+        // unreliable. The Default row is not draggable and not a drop target.
         LazyVStack(spacing: 2) {
             if state.cliSetUp && !state.cliDefaultHidden {
                 WindowProfileRow(name: "Default",
@@ -193,6 +197,16 @@ struct WindowView: View {
                     onRename: { state.renameProfile(name) },
                     onDelete: name == state.activeProfile ? nil : { state.deleteProfile(name) }
                 )
+                .opacity(dragging == name ? 0.4 : 1)
+                .onDrag {
+                    dragging = name
+                    return NSItemProvider(object: name as NSString)
+                } preview: {
+                    DragPreview(name: name)
+                }
+                .onDrop(of: [.plainText], delegate: ProfileDropDelegate(
+                    item: name, order: $state.allProfiles, dragging: $dragging,
+                    onDrop: { state.saveProfileOrder() }))
             }
         }
         .padding(6)
@@ -227,6 +241,16 @@ struct WindowView: View {
                     onRename: { state.renameProfile(name) },
                     onDelete: name == state.activeProfile ? nil : { state.deleteProfile(name) }
                 )
+                .opacity(dragging == name ? 0.4 : 1)
+                .onDrag {
+                    dragging = name
+                    return NSItemProvider(object: name as NSString)
+                } preview: {
+                    DragPreview(name: name)
+                }
+                .onDrop(of: [.plainText], delegate: ProfileDropDelegate(
+                    item: name, order: $state.allProfiles, dragging: $dragging,
+                    onDrop: { state.saveProfileOrder() }))
             }
         }
         .padding(8)
@@ -360,6 +384,52 @@ struct LaunchAtLoginToggle: View {
     }
 }
 
+/// Live reorder for the profile list: as the dragged row passes over another,
+/// the array is spliced so rows slide in real time; the drop persists it.
+struct ProfileDropDelegate: DropDelegate {
+    let item: String
+    @Binding var order: [String]
+    @Binding var dragging: String?
+    let onDrop: () -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != item,
+              let from = order.firstIndex(of: dragging),
+              let to = order.firstIndex(of: item) else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            order.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        onDrop()
+        return true
+    }
+}
+
+/// Drag image for reorder. The default preview snapshots the row, whose
+/// background is translucent — over the desktop it reads as a faint shadow.
+/// An opaque, tight chip lifts cleanly instead.
+struct DragPreview: View {
+    let name: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Avatar(name: name, active: false, size: 22)
+            Text(name).font(.system(size: 12)).lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.1)))
+        )
+    }
+}
+
 /// Rows in a subtle grouped container, macOS-settings style.
 struct GroupBoxList<Content: View>: View {
     @ViewBuilder let content: Content
@@ -391,20 +461,33 @@ struct WindowProfileRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Avatar(name: name, active: desktopActive, size: 26)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name)
-                    .font(.system(size: 13))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(.primary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+            // The clickable region is a Button, not a whole-row .onTapGesture:
+            // a tap gesture on the row swallows List's drag, killing reorder.
+            // A Button coexists with drag — click switches, drag reorders.
+            Button {
+                if let onDesktop { onDesktop() } else { onCLI?() }
+            } label: {
+                HStack(spacing: 10) {
+                    Avatar(name: name, active: desktopActive, size: 26)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(name)
+                            .font(.system(size: 13))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(.primary)
+                        if let subtitle {
+                            Text(subtitle)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 8)
                 }
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 8)
+            .buttonStyle(PressableStyle())
+            .disabled(disabled || (onDesktop != nil ? desktopActive : cliActive))
+
             if hovering && !disabled {
                 if let onRename {
                     IconButton(systemName: "pencil", help: "Rename", action: onRename)
@@ -439,14 +522,6 @@ struct WindowProfileRow: View {
                       : .clear)
         )
         .contentShape(Rectangle())
-        // Clicking the row switches Desktop (CLI for rows without a Desktop
-        // side, like Default) — same meaning as the menu bar panel. The chips
-        // are buttons, so they keep swallowing their own clicks.
-        .onTapGesture {
-            guard !disabled else { return }
-            if let onDesktop { if !desktopActive { onDesktop() } }
-            else if let onCLI, !cliActive { onCLI() }
-        }
         .contextMenu { rowMenu }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)

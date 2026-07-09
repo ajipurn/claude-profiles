@@ -47,6 +47,10 @@ public final class ProfileManager {
     public var claudeDir: URL { home.appendingPathComponent("Library/Application Support/Claude") }
     public var profilesDir: URL { home.appendingPathComponent("Library/Application Support/Claude-Profiles") }
     public var sharedDir: URL { profilesDir.appendingPathComponent("_shared-sessions") }
+    // Display order for the unified list, one name per line. `_` prefix keeps
+    // profiles() from listing it. Order is a plain list, never dir renames —
+    // renaming a profile would log its CLI side out (path = Keychain identity).
+    private var orderFile: URL { profilesDir.appendingPathComponent("_order") }
 
     // MARK: - Inspection
 
@@ -70,6 +74,32 @@ public final class ProfileManager {
         return names
             .filter { !$0.hasPrefix("_") && !$0.hasPrefix(".") && isRealDirectory(profilesDir.appendingPathComponent($0)) }
             .sorted()
+    }
+
+    public func savedOrder() -> [String] {
+        guard let raw = try? String(contentsOf: orderFile, encoding: .utf8) else { return [] }
+        return raw.split(whereSeparator: \.isNewline).map(String.init)
+    }
+
+    public func saveOrder(_ names: [String]) throws {
+        try fm.createDirectory(at: profilesDir, withIntermediateDirectories: true)
+        try (names.joined(separator: "\n") + "\n").write(to: orderFile, atomically: true, encoding: .utf8)
+    }
+
+    /// Sort `names` by the saved order; names not in the file (created outside
+    /// the app, or before ordering existed) fall to the end alphabetically — so
+    /// a freshly created profile shows up last until the user drags it.
+    public func ordered(_ names: [String]) -> [String] {
+        let rank = Dictionary(savedOrder().enumerated().map { ($1, $0) },
+                              uniquingKeysWith: { first, _ in first })
+        return names.sorted {
+            switch (rank[$0], rank[$1]) {
+            case let (a?, b?): return a < b
+            case (_?, nil):    return true
+            case (nil, _?):    return false
+            default:           return $0 < $1
+            }
+        }
     }
 
     public func activeProfile() -> String? {

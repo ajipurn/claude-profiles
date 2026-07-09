@@ -65,7 +65,7 @@ final class AppState: ObservableObject {
         // carry over — Desktop and CLI have separate auth — so each context
         // still asks to log in once.
         cliCreated = Set(cli.profiles())
-        allProfiles = cliCreated.union(profiles).sorted()
+        allProfiles = manager.ordered(Array(cliCreated.union(profiles)))
         activeCLIProfile = cli.activeProfile()
         cliSetUp = cli.isSetUp
         cliDefaultHidden = cli.defaultHidden
@@ -180,12 +180,19 @@ final class AppState: ObservableObject {
         ) else { return }
         do {
             try manager.createProfile(name: name)
+            try? manager.saveOrder(manager.savedOrder().filter { $0 != name } + [name])
             Notifier.post("Profile “\(name)” created",
                           "Use it for Desktop or CLI whenever you're ready — each logs in once, then never again.")
         } catch {
             Notifier.post("Could not create profile", error.localizedDescription)
         }
         refresh()
+    }
+
+    /// Persist the current list order after a drag-reorder. The drop delegate
+    /// already reordered `allProfiles` live; this writes it to disk.
+    func saveProfileOrder() {
+        try? manager.saveOrder(allProfiles)
     }
 
     /// Renames a profile everywhere it exists, so the row never splits in two.
@@ -225,6 +232,7 @@ final class AppState: ObservableObject {
                 do {
                     try self.manager.renameProfile(name, to: newName)
                     renameCLI()
+                    try? self.manager.saveOrder(self.manager.savedOrder().map { $0 == name ? newName : $0 })
                     Notifier.post("Renamed to “\(newName)”")
                 } catch {
                     Notifier.post("Rename failed", error.localizedDescription)
@@ -235,6 +243,7 @@ final class AppState: ObservableObject {
             do {
                 if hasDesktop { try manager.renameProfile(name, to: newName) }
                 renameCLI()
+                try? manager.saveOrder(manager.savedOrder().map { $0 == name ? newName : $0 })
                 Notifier.post("Renamed to “\(newName)”")
             } catch {
                 Notifier.post("Rename failed", error.localizedDescription)
@@ -267,6 +276,7 @@ final class AppState: ObservableObject {
         do {
             if hasDesktop { try manager.deleteProfile(name: name) } // throws if active
             if hasCLI { try cli.deleteProfile(name: name) }
+            try? manager.saveOrder(manager.savedOrder().filter { $0 != name })
             Notifier.post("Profile “\(name)” deleted")
         } catch {
             Notifier.post("Delete failed", error.localizedDescription)
