@@ -11,8 +11,8 @@
 set -e
 cd "$(dirname "$0")/.."
 
-VERSION="${1:-1.2.1}"
-BUILD="${2:-14}"
+VERSION="${1:-1.2.2}"
+BUILD="${2:-15}"
 
 swift build -c release
 
