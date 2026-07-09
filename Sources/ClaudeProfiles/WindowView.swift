@@ -291,24 +291,25 @@ struct PillPicker<T: Hashable>: View {
     }
 }
 
-/// Button as a raised pill — same body as PillPicker's selected segment.
+/// Button as a raised pill, filled with the app accent — the one loud control
+/// on the page, so the primary action reads at a glance.
 struct RaisedPillButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(isEnabled ? Color.primary : Color.secondary)
+            .foregroundStyle(.white)
             .padding(.horizontal, 13)
             // 30 = PillPicker's outer height (24 segment + 3 track padding × 2),
             // so the button sits flush with pickers on the same row.
             .frame(height: 30)
             .background(
                 Capsule()
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .shadow(color: .black.opacity(isEnabled ? 0.16 : 0.06), radius: 2, y: 1)
-                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+                    .fill(accent)
+                    .shadow(color: accent.opacity(isEnabled ? 0.45 : 0.1), radius: 2, y: 1)
             )
+            .opacity(isEnabled ? 1 : 0.5)
             .contentShape(Capsule())
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
@@ -438,6 +439,14 @@ struct WindowProfileRow: View {
                       : .clear)
         )
         .contentShape(Rectangle())
+        // Clicking the row switches Desktop (CLI for rows without a Desktop
+        // side, like Default) — same meaning as the menu bar panel. The chips
+        // are buttons, so they keep swallowing their own clicks.
+        .onTapGesture {
+            guard !disabled else { return }
+            if let onDesktop { if !desktopActive { onDesktop() } }
+            else if let onCLI, !cliActive { onCLI() }
+        }
         .contextMenu { rowMenu }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -507,6 +516,13 @@ struct WindowProfileCard: View {
                 .strokeBorder(desktopActive ? accent.opacity(0.4) : Color.primary.opacity(0.06))
         )
         .contentShape(Rectangle())
+        // Clicking the card switches Desktop (CLI for the Default card) —
+        // same meaning as list rows and the menu bar panel.
+        .onTapGesture {
+            guard !disabled else { return }
+            if let onDesktop { if !desktopActive { onDesktop() } }
+            else if let onCLI, !cliActive { onCLI() }
+        }
         // Same hover-reveal as list rows; the context menu stays as a second path.
         .overlay(alignment: .topTrailing) {
             if hovering && !disabled {
