@@ -183,10 +183,11 @@ struct WindowView: View {
                                  deleteIcon: "eye.slash",
                                  deleteHelp: "Hide (nothing is deleted)")
             }
-            ForEach(state.allProfiles, id: \.self) { name in
+            ForEach(Array(state.allProfiles.enumerated()), id: \.element) { index, name in
                 WindowProfileRow(
                     name: name,
                     subtitle: nil,
+                    position: index + 1,
                     hasDesktop: state.profiles.contains(name),
                     hasCLI: state.cliCreated.contains(name),
                     desktopActive: name == state.activeProfile,
@@ -228,9 +229,10 @@ struct WindowView: View {
                                   deleteLabel: "Hide (nothing is deleted)",
                                   deleteIcon: "eye.slash")
             }
-            ForEach(state.allProfiles, id: \.self) { name in
+            ForEach(Array(state.allProfiles.enumerated()), id: \.element) { index, name in
                 WindowProfileCard(
                     name: name,
+                    position: index + 1,
                     hasDesktop: state.profiles.contains(name),
                     hasCLI: state.cliCreated.contains(name),
                     desktopActive: name == state.activeProfile,
@@ -446,6 +448,7 @@ struct GroupBoxList<Content: View>: View {
 struct WindowProfileRow: View {
     let name: String
     let subtitle: String?
+    var position: Int? = nil
     let hasDesktop: Bool
     let hasCLI: Bool
     let desktopActive: Bool
@@ -468,6 +471,13 @@ struct WindowProfileRow: View {
                 if let onDesktop { onDesktop() } else { onCLI?() }
             } label: {
                 HStack(spacing: 10) {
+                    if let position {
+                        Text("\(position)")
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 18, alignment: .trailing)
+                    }
                     Avatar(name: name, active: desktopActive, size: 26)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(name)
@@ -537,6 +547,7 @@ struct WindowProfileRow: View {
 /// live in the context menu — cards are too small for hover buttons.
 struct WindowProfileCard: View {
     let name: String
+    var position: Int? = nil
     let hasDesktop: Bool
     let hasCLI: Bool
     let desktopActive: Bool
@@ -590,6 +601,18 @@ struct WindowProfileCard: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(desktopActive ? accent.opacity(0.4) : Color.primary.opacity(0.06))
         )
+        .overlay(alignment: .topLeading) {
+            if let position {
+                Text("\(position)")
+                    .font(.system(size: 9, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    .padding(5)
+            }
+        }
         .contentShape(Rectangle())
         // Clicking the card switches Desktop (CLI for the Default card) —
         // same meaning as list rows and the menu bar panel.
