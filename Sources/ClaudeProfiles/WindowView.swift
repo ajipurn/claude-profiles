@@ -71,6 +71,7 @@ struct WindowView: View {
             ScrollView {
                 if viewMode == .list { profileList } else { profileGrid }
             }
+            .scrollIndicators(.never)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.045)))
         }
     }
@@ -134,6 +135,7 @@ struct WindowView: View {
                 }
             }
         }
+        .scrollIndicators(.never)
     }
 
     private var sharedHistoryBinding: Binding<Bool> {

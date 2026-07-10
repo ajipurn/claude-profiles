@@ -22,9 +22,15 @@ final class AppState: ObservableObject {
     @Published var cliSetUp = false
     @Published var cliDefaultHidden = false
     @Published var usage: [String: ProfileUsage] = [:] // per Desktop profile
-    private var usageScanRunning = false
+    @Published var usageScanRunning = false
+    @Published var lastUsageScan: Date?
 
     var claudeAppFound: Bool { claude.appURL != nil }
+
+    /// The panel's refresh button and the status-item menu both live outside
+    /// any SwiftUI scene, so opening the main window goes through this hook
+    /// (set by the app delegate) instead of @Environment(\.openWindow).
+    var openWindowHandler: (() -> Void)?
 
     init() {
         refresh()
@@ -91,7 +97,7 @@ final class AppState: ObservableObject {
 
     /// Scans every profile's cache off the main thread; cheap (small files
     /// only) but not free, so runs are coalesced.
-    private func refreshUsage() {
+    func refreshUsage() {
         guard !usageScanRunning else { return }
         usageScanRunning = true
         let names = profiles
@@ -104,6 +110,7 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 self.usage = map
                 self.usageScanRunning = false
+                self.lastUsageScan = Date()
             }
         }
     }
