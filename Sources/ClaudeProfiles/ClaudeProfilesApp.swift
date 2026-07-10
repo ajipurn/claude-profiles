@@ -26,17 +26,18 @@ struct ClaudeProfilesApp: App {
         } label: {
             if state.isSwitching {
                 Image(systemName: "arrow.triangle.2.circlepath")
-            } else if let icon = Self.menuBarIcon {
-                Image(nsImage: icon)
+            } else if state.mode == .ready, let active = state.activeProfile,
+                      let remaining = state.usage[active]?.fiveHourRemaining {
+                // Icon + level readout composited into ONE NSImage — the only
+                // rendering path the status item reliably shows in color.
+                Image(nsImage: MenuBarLevel.composite(icon: Self.menuBarIcon, remaining: remaining))
             } else {
-                Image(systemName: "person.crop.circle") // `swift run` has no bundle resources
-            }
-            // What's left of the active account's 5-hour window, battery-style.
-            // Falls back to the profile's initials when no usage is cached yet.
-            if !state.isSwitching, state.mode == .ready, let active = state.activeProfile {
-                if let remaining = state.usage[active]?.fiveHourRemaining {
-                    MenuBarLevel(remaining: remaining)
+                if let icon = Self.menuBarIcon {
+                    Image(nsImage: icon)
                 } else {
+                    Image(systemName: "person.crop.circle") // `swift run` has no bundle resources
+                }
+                if state.mode == .ready, let active = state.activeProfile {
                     Text(Avatar.initials(active))
                 }
             }
@@ -58,25 +59,53 @@ struct ClaudeProfilesApp: App {
     }
 }
 
-/// Menu bar readout: remaining share of the active account's 5-hour window,
-/// as a number over a tiny level bar (fill = what's left, battery-style).
-struct MenuBarLevel: View {
-    let remaining: Int
+/// Menu bar readout, drawn with AppKit into a single full-color NSImage:
+/// the app icon plus what's left of the active account's 5-hour window —
+/// a number over a tiny level bar (fill = what's left, battery-style;
+/// green/yellow/red like the window's meters). One image because macOS
+/// flattens any other MenuBarExtra label content to a monochrome template,
+/// and sibling views next to an NSImage proved unreliable.
+enum MenuBarLevel {
+    @MainActor private static var cache: [String: NSImage] = [:]
 
-    var body: some View {
-        VStack(spacing: 2) {
-            Text("\(remaining)%")
-                .font(.system(size: 9, weight: .semibold))
-                .monospacedDigit()
-            Capsule()
-                .fill(.secondary.opacity(0.35))
-                .frame(width: 22, height: 3)
-                .overlay(alignment: .leading) {
-                    Capsule()
-                        .fill(ProfileUsage.severityColor(usedPercent: Double(100 - remaining)))
-                        .frame(width: max(3, 22 * CGFloat(remaining) / 100))
-                }
+    @MainActor static func composite(icon: NSImage?, remaining: Int) -> NSImage {
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let key = "\(remaining)-\(dark)-\(icon != nil)"
+        if let hit = cache[key] { return hit }
+
+        let iconSide: CGFloat = icon == nil ? 0 : 20
+        let gap: CGFloat = icon == nil ? 0 : 3
+        let levelWidth: CGFloat = 28
+        let size = NSSize(width: iconSide + gap + levelWidth, height: 20)
+
+        let image = NSImage(size: size, flipped: false) { rect in
+            icon?.draw(in: NSRect(x: 0, y: 0, width: iconSide, height: iconSide))
+
+            let left = iconSide + gap
+            let text = "\(remaining)%" as NSString
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold),
+                .foregroundColor: dark ? NSColor.white : NSColor.black.withAlphaComponent(0.85),
+            ]
+            let textSize = text.size(withAttributes: attrs)
+            text.draw(at: NSPoint(x: left + (levelWidth - textSize.width) / 2, y: 8),
+                      withAttributes: attrs)
+
+            let track = NSRect(x: left + 2, y: 3, width: levelWidth - 4, height: 3)
+            (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.2).setFill()
+            NSBezierPath(roundedRect: track, xRadius: 1.5, yRadius: 1.5).fill()
+
+            let fillColor: NSColor = remaining > 40 ? .systemGreen
+                : remaining > 10 ? .systemYellow : .systemRed
+            let fill = NSRect(x: track.minX, y: 3,
+                              width: max(3, track.width * CGFloat(remaining) / 100), height: 3)
+            fillColor.setFill()
+            NSBezierPath(roundedRect: fill, xRadius: 1.5, yRadius: 1.5).fill()
+            return true
         }
+        image.isTemplate = false
+        cache[key] = image
+        return image
     }
 }
 
@@ -110,32 +139,16 @@ struct PanelView: View {
                         .padding(.trailing, 6)
                     }
                 }
-                if state.cliSetUp && !state.cliDefaultHidden {
-                    // The CLI's default account: plain ~/.claude, no Desktop side.
-                    ProfileRow(name: "Default",
-                               hasDesktop: false, hasCLI: true,
-                               desktopActive: false,
-                               cliActive: state.activeCLIProfile == nil,
-                               disabled: false,
-                               onDesktop: nil,
-                               onCLI: { state.switchCLI(nil) },
-                               onDelete: { state.hideDefaultRow() },
-                               deleteIcon: "eye.slash",
-                               deleteHelp: "Hide (nothing is deleted)")
-                }
-                ForEach(state.allProfiles, id: \.self) { name in
-                    ProfileRow(
-                        name: name,
-                        hasDesktop: state.profiles.contains(name),
-                        hasCLI: state.cliCreated.contains(name),
-                        desktopActive: name == state.activeProfile,
-                        cliActive: name == state.activeCLIProfile,
-                        disabled: !state.claudeAppFound || state.isSwitching,
-                        onDesktop: { state.switchTo(name) },
-                        onCLI: state.cliSetUp ? { state.switchCLI(name) } : nil,
-                        onRename: { state.renameProfile(name) },
-                        onDelete: name == state.activeProfile ? nil : { state.deleteProfile(name) }
-                    )
+                // Many profiles would grow the panel past the screen; beyond
+                // ~9 rows the list gets a fixed height and scrolls, while the
+                // action rows below stay put.
+                if profileRowCount > 9 {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 2) { profileRows }
+                    }
+                    .frame(height: 378)
+                } else {
+                    profileRows
                 }
                 ActionRow(icon: "plus.circle.fill", title: "New Profile", tint: accent,
                           disabled: !state.claudeAppFound || state.isSwitching) {
@@ -170,6 +183,38 @@ struct PanelView: View {
         .frame(width: 280)
         .onAppear { state.refresh() }
     }
+
+    private var profileRowCount: Int {
+        state.allProfiles.count + (state.cliSetUp && !state.cliDefaultHidden ? 1 : 0)
+    }
+
+    // Rename/delete/hide live in the window app only — hover buttons made
+    // these compact rows a mess. The panel is for switching.
+    @ViewBuilder private var profileRows: some View {
+        if state.cliSetUp && !state.cliDefaultHidden {
+            // The CLI's default account: plain ~/.claude, no Desktop side.
+            ProfileRow(name: "Default",
+                       hasDesktop: false, hasCLI: true,
+                       desktopActive: false,
+                       cliActive: state.activeCLIProfile == nil,
+                       disabled: false,
+                       onDesktop: nil,
+                       onCLI: { state.switchCLI(nil) })
+        }
+        ForEach(state.allProfiles, id: \.self) { name in
+            ProfileRow(
+                name: name,
+                usage: state.usage[name],
+                hasDesktop: state.profiles.contains(name),
+                hasCLI: state.cliCreated.contains(name),
+                desktopActive: name == state.activeProfile,
+                cliActive: name == state.activeCLIProfile,
+                disabled: !state.claudeAppFound || state.isSwitching,
+                onDesktop: { state.switchTo(name) },
+                onCLI: state.cliSetUp ? { state.switchCLI(name) } : nil
+            )
+        }
+    }
 }
 
 // MARK: - Rows
@@ -180,6 +225,7 @@ struct PanelView: View {
 /// rename/delete actions, so the list stays quiet.
 struct ProfileRow: View {
     let name: String
+    var usage: ProfileUsage? = nil
     let hasDesktop: Bool
     let hasCLI: Bool
     let desktopActive: Bool
@@ -187,10 +233,6 @@ struct ProfileRow: View {
     let disabled: Bool
     let onDesktop: (() -> Void)?
     let onCLI: (() -> Void)?
-    var onRename: (() -> Void)?
-    var onDelete: (() -> Void)?
-    var deleteIcon = "trash"
-    var deleteHelp = "Delete (logout)"
     @State private var hovering = false
 
     var body: some View {
@@ -202,10 +244,15 @@ struct ProfileRow: View {
                     // Desktop is the row's primary identity — CLI-active alone
                     // shows only the accent terminal tag, keeping hierarchy clear.
                     Avatar(name: name, active: desktopActive)
-                    Text(name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(.primary)
+                        if let usage, usage.hasLiveWindows {
+                            UsageLevels(usage: usage, barWidth: 22)
+                        }
+                    }
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
@@ -213,14 +260,6 @@ struct ProfileRow: View {
             .buttonStyle(PressableStyle())
             .disabled(onDesktop != nil ? (disabled || desktopActive) : cliActive)
 
-            if hovering && !disabled {
-                if let onRename {
-                    IconButton(systemName: "pencil", help: "Rename", action: onRename)
-                }
-                if let onDelete {
-                    IconButton(systemName: deleteIcon, help: deleteHelp, action: onDelete)
-                }
-            }
             if let onDesktop, desktopActive || (hovering && !disabled) {
                 ContextIcon(systemName: "macwindow",
                             active: desktopActive, present: hasDesktop, disabled: disabled,
@@ -239,7 +278,8 @@ struct ProfileRow: View {
             }
         }
         .padding(.horizontal, 8)
-        .frame(height: 32)
+        .padding(.vertical, 5)
+        .frame(minHeight: 32)
         .background(
             RoundedRectangle(cornerRadius: 7)
                 .fill(desktopActive ? accent.opacity(0.13)

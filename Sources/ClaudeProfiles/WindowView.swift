@@ -434,54 +434,56 @@ struct DragPreview: View {
     }
 }
 
-/// Presentation of the cached usage-limit snapshot. Expired windows (reset
-/// time already passed) say nothing about the present and are dropped.
+/// Presentation of the cached usage-limit snapshot, battery-style: everything
+/// is *remaining* share. An expired window has reset since Claude last looked,
+/// so the account is back to 100%; only never-seen windows draw nothing.
+extension ProfileUsage.Window {
+    var remainingPercent: Int {
+        expired ? 100 : max(0, min(100, 100 - Int(percent)))
+    }
+}
+
 extension ProfileUsage {
-    private var live: [(label: String, window: Window)] {
-        var out: [(String, Window)] = []
-        if let f = fiveHour, !f.expired { out.append(("5h", f)) }
-        if let s = sevenDay, !s.expired { out.append(("7d", s)) }
+    /// True when there is anything to draw (= the account logged in at least once).
+    var hasLiveWindows: Bool { !levels.isEmpty }
+
+    /// (label, remaining-percent) per known window.
+    var levels: [(label: String, remaining: Int)] {
+        var out: [(String, Int)] = []
+        if let f = fiveHour { out.append(("5h", f.remainingPercent)) }
+        if let s = sevenDay { out.append(("7d", s.remainingPercent)) }
         return out
     }
 
-    /// True when there is anything current to draw.
-    var hasLiveWindows: Bool { !live.isEmpty }
-
-    /// (label, used-percent) for each window still inside its horizon.
-    var levels: [(label: String, percent: Double)] {
-        live.map { ($0.label, $0.window.percent) }
-    }
-
-    /// Remaining share of the 5-hour window, battery-style. An expired window
-    /// has reset since Claude last looked, so the account is back to 100%.
-    var fiveHourRemaining: Int? {
-        guard let f = fiveHour else { return nil }
-        return f.expired ? 100 : max(0, min(100, 100 - Int(f.percent)))
-    }
+    /// Remaining share of the 5-hour window, for the menu bar.
+    var fiveHourRemaining: Int? { fiveHour?.remainingPercent }
 
     var tooltip: String {
         let rel = RelativeDateTimeFormatter()
         var lines: [String] = []
-        if let f = fiveHour, !f.expired {
-            lines.append("Session (5h): \(Int(f.percent))% used"
-                + (f.resetsAt.map { " — resets \(rel.localizedString(for: $0, relativeTo: Date()))" } ?? ""))
+        func line(_ name: String, _ w: Window?) {
+            guard let w else { return }
+            var text = "\(name): \(w.remainingPercent)% left"
+            if !w.expired, let resetsAt = w.resetsAt {
+                text += " — resets \(rel.localizedString(for: resetsAt, relativeTo: Date()))"
+            }
+            lines.append(text)
         }
-        if let s = sevenDay, !s.expired {
-            lines.append("Week: \(Int(s.percent))% used"
-                + (s.resetsAt.map { " — resets \(rel.localizedString(for: $0, relativeTo: Date()))" } ?? ""))
-        }
+        line("Session (5h)", fiveHour)
+        line("Week", sevenDay)
         lines.append("From Claude's own last check, \(rel.localizedString(for: asOf, relativeTo: Date()))")
         return lines.joined(separator: "\n")
     }
 
-    static func severityColor(usedPercent: Double) -> Color {
-        usedPercent >= 90 ? .red : usedPercent >= 70 ? .orange : accent
+    /// Traffic light over what's left: comfortable / getting low / nearly out.
+    static func remainingColor(_ remaining: Int) -> Color {
+        remaining > 40 ? .green : remaining > 10 ? .yellow : .red
     }
 }
 
-/// One thin capsule meter, filled by used share of a limit window.
+/// One thin capsule meter, filled by the remaining share of a limit window.
 struct UsageBar: View {
-    let percent: Double // used, 0–100
+    let remaining: Int // 0–100
     var width: CGFloat = 40
 
     var body: some View {
@@ -490,25 +492,37 @@ struct UsageBar: View {
             .frame(width: width, height: 4)
             .overlay(alignment: .leading) {
                 Capsule()
-                    .fill(ProfileUsage.severityColor(usedPercent: percent))
-                    .frame(width: max(4, width * min(max(percent, 0), 100) / 100))
+                    .fill(ProfileUsage.remainingColor(remaining))
+                    .frame(width: max(4, width * CGFloat(min(max(remaining, 0), 100)) / 100))
             }
     }
 }
 
-/// The per-profile usage levels: a labeled meter per live window.
+/// The per-profile usage levels: per known window a labeled meter with the
+/// remaining percent spelled out. `vertical` stacks the windows (grid cards).
 struct UsageLevels: View {
     let usage: ProfileUsage
     var barWidth: CGFloat = 40
+    var vertical = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        let layout = vertical
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 3))
+            : AnyLayout(HStackLayout(spacing: 10))
+        layout {
             ForEach(usage.levels, id: \.label) { level in
                 HStack(spacing: 4) {
                     Text(level.label)
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
-                    UsageBar(percent: level.percent, width: barWidth)
+                        .frame(width: 13, alignment: .trailing)
+                    UsageBar(remaining: level.remaining, width: barWidth)
+                    Text("\(level.remaining)%")
+                        .font(.system(size: 9, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(ProfileUsage.remainingColor(level.remaining))
+                        // Fixed so bars align across rows ("0%" vs "100%").
+                        .frame(width: 27, alignment: .leading)
                 }
             }
         }
@@ -576,7 +590,7 @@ struct WindowProfileRow: View {
                                 .foregroundStyle(.secondary)
                         }
                         if let usage, usage.hasLiveWindows {
-                            UsageLevels(usage: usage, barWidth: 40)
+                            UsageLevels(usage: usage, barWidth: 56, vertical: true)
                                 .padding(.top, 1)
                         }
                     }
@@ -613,7 +627,8 @@ struct WindowProfileRow: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 44)
+        .padding(.vertical, 6)
+        .frame(minHeight: 44)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(desktopActive ? accent.opacity(0.12)
@@ -659,9 +674,18 @@ struct WindowProfileCard: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(.primary)
-            if let usage, usage.hasLiveWindows {
-                UsageLevels(usage: usage, barWidth: 30)
+            // Fixed-height slot whether usage is known or not, so every card
+            // in a row is the same height and the grid stays tidy.
+            Group {
+                if let usage, usage.hasLiveWindows {
+                    UsageLevels(usage: usage, barWidth: 34, vertical: true)
+                } else {
+                    Text("no usage data yet")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.quaternary)
+                }
             }
+            .frame(height: 25)
             HStack(spacing: 6) {
                 if let onDesktop {
                     ContextIcon(systemName: "macwindow",
