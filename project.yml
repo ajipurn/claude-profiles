@@ -22,6 +22,9 @@ targets:
         CFBundleName: Claude Profiles
         CFBundleDisplayName: Claude Profiles
         NSHumanReadableCopyright: ""
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.local.ClaudeProfiles
+            CFBundleURLSchemes: [claudeprofiles]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.local.ClaudeProfiles

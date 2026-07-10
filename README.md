@@ -16,13 +16,16 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 
 ## Features
 
-- 🔁 **Instant account switching** — one click in the menu bar, ~5 seconds, no login screen
+- 🔁 **Instant account switching** — one click in the menu bar (or right-click for the quick menu), ~5 seconds, no login screen
 - 📊 **Usage limits per account** — every profile shows its official session & weekly usage (as of that account's last use), read from Claude's own local cache
+- ◐ **Live menu bar gauge** — what's left of the active account's 5-hour window, colored green/yellow/red, updated the moment Claude refreshes its own numbers; in the red it adds a countdown to the reset
+- 🔔 **Low-limit alerts** — under 10% left, a notification suggests your freshest account; clicking it switches immediately
 - 🗂 **Shared session history** *(optional)* — all your accounts see one combined sidebar, so nothing "disappears" when you switch
 - ⌨️ **Claude Code (CLI) too** *(optional)* — one list for everything: each profile can be used for Desktop, for `claude` in the terminal, or both
-- ✏️ **Rename & delete profiles** — hover a profile in the panel; deleting a profile = logging that account out
+- ⚡ **Hotkeys & scripting** — ⌘⌥1…9 switches to the Nth profile from anywhere; `claudeprofiles://switch/<name>` does it from Raycast, Alfred, or a shell
+- ✏️ **Rename & delete profiles** — in the window view; deleting a profile = logging that account out
 - 🚀 **Launch at login**, zero setup after the first run
-- 🔒 **Private by design** — no internet access, no analytics, and it never reads your passwords, cookies, or tokens. It only moves folders around on your Mac and reads Claude's own local files.
+- 🔒 **Private by design** — no analytics, and it never reads your passwords, cookies, or tokens. It only moves folders around on your Mac and reads Claude's own local files. Its only self-initiated network request is the optional weekly update check.
 
 ## Requirements
 
@@ -37,7 +40,7 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 
 ### "Apple could not verify this app is free of malware…"
 
-This build isn't notarized by Apple yet (that requires a paid Apple Developer account — it's on the roadmap). The app is open source, makes no network connections, and you can read every line it runs — but macOS can't know that, so it warns you **once**. How to get past it:
+This build isn't notarized by Apple yet (that requires a paid Apple Developer account — it's on the roadmap). The app is open source, makes no network connections beyond an optional weekly update check, and you can read every line it runs — but macOS can't know that, so it warns you **once**. How to get past it:
 
 **macOS 15 (Sequoia) and newer:**
 
@@ -105,7 +108,7 @@ The **Default** row is your original `~/.claude` account, untouched — with all
 Because this build isn't notarized (Apple's paid code-review stamp) — not because anything was detected. macOS shows that exact dialog for *every* un-notarized app. See [the install section](#apple-could-not-verify-this-app-is-free-of-malware) for the one-time fix, or build from source to skip it entirely.
 
 **Is this safe? Where does my data go?**
-Everything stays on your Mac. The app is open source, makes zero network requests, and never touches passwords, cookies, or tokens — it only moves and links folders, and reads a few of Claude's own local files (its config, and its cache for the usage display). Your profiles live in `~/Library/Application Support/Claude-Profiles/`, as plain folders you can open in Finder.
+Everything stays on your Mac. The app is open source and never touches passwords, cookies, or tokens — it only moves and links folders, and reads a few of Claude's own local files (its config, and its cache for the usage display). Its one self-initiated network request is an optional weekly update check against GitHub's public releases feed (nothing about you or your profiles is sent; turn it off in Settings → General). Your profiles live in `~/Library/Application Support/Claude-Profiles/`, as plain folders you can open in Finder.
 
 **Where do the usage numbers come from? Are they live?**
 From Claude itself: Claude Desktop regularly asks claude.ai how much of your limit is used, and keeps the answer in its local cache. The app reads that cache — per profile, fully offline. So the numbers are exactly what that account last saw: near-live for the profile you're using now, older for profiles you haven't opened in a while (the tooltip shows when they were from). Windows whose reset time has passed are dropped rather than shown stale.

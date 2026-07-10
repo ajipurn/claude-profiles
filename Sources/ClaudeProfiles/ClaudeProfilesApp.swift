@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Combine
 import ServiceManagement
+import UserNotifications
 import ClaudeProfilesCore
 
 let accent = Color(red: 0.85, green: 0.47, blue: 0.34) // matches the app icon
@@ -41,6 +42,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         state.openWindowHandler = { [weak self] in self?.showMainWindow() }
+        // Same bundle guard as Notifier: the notification center throws
+        // without a real .app bundle (`swift run`).
+        if Bundle.main.bundleIdentifier != nil, Bundle.main.bundleURL.pathExtension == "app" {
+            UNUserNotificationCenter.current().delegate = self
+        }
+        HotKeys.install { [weak self] index in
+            guard let self, self.state.mode == .ready, !self.state.isSwitching,
+                  self.state.claudeAppFound, index < self.state.allProfiles.count else { return }
+            let name = self.state.allProfiles[index]
+            if name != self.state.activeProfile { self.state.switchTo(name) }
+        }
+        scheduleUpdateChecks()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.autosaveName = "dev.local.ClaudeProfiles.status"
@@ -82,6 +95,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Scripting hook (Raycast/Alfred/shell): `claudeprofiles://switch/<name>`
+    /// switches Desktop, `claudeprofiles://switch-cli/<name>` the CLI
+    /// (`Default` = the plain ~/.claude account), `claudeprofiles://open`
+    /// shows the window.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "claudeprofiles" {
+            let name = url.pathComponents.count > 1 ? url.pathComponents[1] : nil
+            switch url.host {
+            case "open":
+                showMainWindow()
+            case "switch":
+                guard let name, state.allProfiles.contains(name) else {
+                    Notifier.post("Unknown profile", "No profile named “\(name ?? "?")”.")
+                    continue
+                }
+                if name != state.activeProfile { state.switchTo(name) }
+            case "switch-cli":
+                guard let name else { continue }
+                if name == "Default" {
+                    state.switchCLI(nil)
+                } else if state.allProfiles.contains(name) {
+                    state.switchCLI(name)
+                } else {
+                    Notifier.post("Unknown profile", "No profile named “\(name)”.")
+                }
+            default:
+                break
+            }
+        }
+    }
+
     // MARK: Status item
 
     private func updateStatusImage() {
@@ -89,13 +133,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.isSwitching {
             button.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
                                    accessibilityDescription: "Switching")
-        } else if state.mode == .ready, let active = state.activeProfile,
-                  let remaining = state.usage[active]?.fiveHourRemaining {
-            button.image = MenuBarLevel.composite(remaining: remaining)
+            button.toolTip = "Switching profiles…"
+        } else if state.mode == .ready, let active = state.activeProfile {
+            if let usage = state.usage[active], let remaining = usage.fiveHourRemaining {
+                // In the red zone the readout gains a countdown to the reset —
+                // the number that actually matters once the window is spent.
+                var suffix: String?
+                if remaining <= 10, let window = usage.fiveHour, !window.expired,
+                   let resetsAt = window.resetsAt, resetsAt > Date() {
+                    suffix = Self.countdown(to: resetsAt)
+                }
+                button.image = MenuBarLevel.composite(remaining: remaining, suffix: suffix)
+                button.toolTip = "\(active)\n\(usage.tooltip)"
+            } else {
+                // Same pill, gray "--": this account has no cached numbers yet
+                // (never logged in, or Claude hasn't fetched usage there).
+                button.image = MenuBarLevel.composite(remaining: nil)
+                button.toolTip = "\(active) — no usage data yet. Open Claude with this profile once."
+            }
         } else {
-            let initials = state.mode == .ready ? state.activeProfile.map(Avatar.initials) : nil
-            button.image = MenuBarLevel.plain(icon: Self.menuBarIcon, initials: initials)
+            button.image = MenuBarLevel.plain(icon: Self.menuBarIcon, initials: nil)
+            button.toolTip = "Claude Profiles"
         }
+    }
+
+    /// "42m" under an hour, "1h05m" above. Refreshes with each usage poll.
+    private static func countdown(to date: Date) -> String {
+        let minutes = max(1, Int(date.timeIntervalSinceNow / 60))
+        return minutes >= 60
+            ? "\(minutes / 60)h\(String(format: "%02d", minutes % 60))m"
+            : "\(minutes)m"
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -166,6 +233,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuOpenWindow() { showMainWindow() }
     @objc private func menuRefreshUsage() { state.refreshUsage() }
 
+    // MARK: Update check
+
+    /// Weekly, optional (Settings toggle, default on), and the app's only
+    /// self-initiated network request: GitHub's public releases endpoint.
+    /// Fails soft — no release, no network, no noise.
+    private func scheduleUpdateChecks() {
+        maybeCheckForUpdates()
+        Timer.scheduledTimer(withTimeInterval: 12 * 3600, repeats: true) { _ in
+            Task { @MainActor [weak self] in self?.maybeCheckForUpdates() }
+        }
+    }
+
+    private func maybeCheckForUpdates() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "autoUpdateCheck") == nil
+                || defaults.bool(forKey: "autoUpdateCheck") else { return }
+        let last = defaults.object(forKey: "lastUpdateCheckAt") as? Date ?? .distantPast
+        guard Date().timeIntervalSince(last) > 7 * 24 * 3600 else { return }
+        defaults.set(Date(), forKey: "lastUpdateCheckAt")
+        Task {
+            let api = URL(string: "https://api.github.com/repos/ajipurn/claude-profiles/releases/latest")!
+            guard let (data, response) = try? await URLSession.shared.data(from: api),
+                  (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else { return }
+            guard AppVersion.isNewer(tag, than: appVersion),
+                  UserDefaults.standard.string(forKey: "lastNotifiedUpdateTag") != tag else { return }
+            UserDefaults.standard.set(tag, forKey: "lastNotifiedUpdateTag")
+            Notifier.post("Claude Profiles \(tag) is available",
+                          "Click to open the release page.",
+                          userInfo: ["openURL": githubURL.appendingPathComponent("releases/latest").absoluteString])
+        }
+    }
+
     // MARK: Main window
 
     private func showMainWindow() {
@@ -197,6 +298,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: Notification clicks
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    /// The low-limit alert carries its suggested profile in userInfo;
+    /// clicking the notification switches straight to it.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        let userInfo = response.notification.request.content.userInfo
+        let target = userInfo["switchTo"] as? String
+        let link = (userInfo["openURL"] as? String).flatMap(URL.init(string:))
+        Task { @MainActor [weak self] in
+            if let target, let self { self.state.switchTo(target) }
+            if let link { NSWorkspace.shared.open(link) }
+        }
+        completionHandler()
+    }
+
+    /// Menu bar apps count as "foreground", which would silently swallow
+    /// banners — show them anyway.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner])
+    }
+}
+
 // MARK: - Menu bar images
 
 /// Menu bar readout, drawn with AppKit into a single full-color NSImage
@@ -208,17 +336,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum MenuBarLevel {
     @MainActor private static var cache: [String: NSImage] = [:]
 
-    @MainActor static func composite(remaining: Int) -> NSImage {
+    /// `remaining == nil` = no cached usage for this account yet: gray "--"
+    /// and an empty ring instead of the colored gauge.
+    @MainActor static func composite(remaining: Int?, suffix: String? = nil) -> NSImage {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let key = "text-\(remaining)-\(dark)"
+        let key = "text-\(remaining.map(String.init) ?? "nil")-\(suffix ?? "")-\(dark)"
         if let hit = cache[key] { return hit }
 
-        let color: NSColor = remaining > 40 ? .systemGreen
-            : remaining > 10 ? .systemYellow : .systemRed
+        let color: NSColor = {
+            guard let remaining else { return .lightGray }
+            return remaining > 40 ? .systemGreen
+                : remaining > 10 ? .systemYellow : .systemRed
+        }()
         // Same face as ClaudeBar's readout.
         let font = NSFont.monospacedDigitSystemFont(
             ofSize: NSFont.systemFontSize(for: .small), weight: .medium)
-        let attr = NSAttributedString(string: "\(remaining)%",
+        let value = remaining.map { "\($0)%" } ?? "--"
+        let text = suffix.map { "\(value) · \($0)" } ?? value
+        let attr = NSAttributedString(string: text,
                                       attributes: [.font: font, .foregroundColor: color])
 
         let textSize = attr.size()
@@ -242,18 +377,20 @@ enum MenuBarLevel {
             let dotRect = NSRect(x: padding, y: (size.height - dotSide) / 2,
                                  width: dotSide, height: dotSide)
             color.set()
-            if remaining >= 100 {
-                NSBezierPath(ovalIn: dotRect).fill()
-            } else if remaining > 0 {
-                let wedge = NSBezierPath()
-                let center = NSPoint(x: dotRect.midX, y: dotRect.midY)
-                wedge.move(to: center)
-                wedge.appendArc(withCenter: center, radius: dotSide / 2,
-                                startAngle: 90,
-                                endAngle: 90 - 360 * CGFloat(remaining) / 100,
-                                clockwise: true)
-                wedge.close()
-                wedge.fill()
+            if let remaining {
+                if remaining >= 100 {
+                    NSBezierPath(ovalIn: dotRect).fill()
+                } else if remaining > 0 {
+                    let wedge = NSBezierPath()
+                    let center = NSPoint(x: dotRect.midX, y: dotRect.midY)
+                    wedge.move(to: center)
+                    wedge.appendArc(withCenter: center, radius: dotSide / 2,
+                                    startAngle: 90,
+                                    endAngle: 90 - 360 * CGFloat(remaining) / 100,
+                                    clockwise: true)
+                    wedge.close()
+                    wedge.fill()
+                }
             }
             let ring = NSBezierPath(ovalIn: dotRect.insetBy(dx: 0.5, dy: 0.5))
             ring.lineWidth = 1
@@ -307,6 +444,7 @@ struct PanelView: View {
     @ObservedObject var state: AppState
     @State private var tab: PanelTab = .profiles
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var filter = ""
 
     static let width: CGFloat = 340
     static let height: CGFloat = 480
@@ -438,7 +576,22 @@ struct PanelView: View {
                 Banner(icon: "link.badge.plus",
                        text: "Active profile is missing — pick a profile to fix it")
             }
-            if state.cliSetUp && !state.cliDefaultHidden {
+            if state.allProfiles.count > 8 {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    TextField("Filter profiles", text: $filter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+                .padding(.bottom, 2)
+            }
+            if state.cliSetUp && !state.cliDefaultHidden,
+               filter.isEmpty || "default".localizedCaseInsensitiveContains(filter) {
                 // The CLI's default account: plain ~/.claude, no Desktop side.
                 ProfileRow(name: "Default",
                            hasDesktop: false, hasCLI: true,
@@ -448,7 +601,7 @@ struct PanelView: View {
                            onDesktop: nil,
                            onCLI: { state.switchCLI(nil) })
             }
-            ForEach(state.allProfiles, id: \.self) { name in
+            ForEach(filteredProfiles, id: \.self) { name in
                 ProfileRow(
                     name: name,
                     usage: state.usage[name],
@@ -466,6 +619,11 @@ struct PanelView: View {
                 state.newProfile()
             }
         }
+    }
+
+    private var filteredProfiles: [String] {
+        filter.isEmpty ? state.allProfiles
+            : state.allProfiles.filter { $0.localizedCaseInsensitiveContains(filter) }
     }
 
     // MARK: More tab

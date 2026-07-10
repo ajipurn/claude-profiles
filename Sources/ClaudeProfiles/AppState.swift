@@ -99,6 +99,49 @@ final class AppState: ObservableObject {
             mode = .ready
         }
         refreshUsage()
+        watchActiveProfileCache()
+    }
+
+    // MARK: - Cache watcher
+
+    private var cacheWatcher: DispatchSourceFileSystemObject?
+    private var watchedCachePath: String?
+    private var watchDebounce: DispatchWorkItem?
+
+    /// Kicks a usage rescan whenever Claude writes into the active profile's
+    /// HTTP cache directory, so the menu bar tracks in near-realtime instead
+    /// of waiting out the 60-second poll (which stays as the fallback — file
+    /// rewrites that don't touch the directory entry go unseen here).
+    private func watchActiveProfileCache() {
+        let path = activeProfile.map {
+            manager.profilesDir.appendingPathComponent($0)
+                .appendingPathComponent("Cache/Cache_Data").path
+        }
+        guard path != watchedCachePath else { return }
+        cacheWatcher?.cancel()
+        cacheWatcher = nil
+        watchedCachePath = path
+        guard let path else { return }
+        let fd = open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            watchedCachePath = nil // dir not there yet (never logged in) — retry next refresh
+            return
+        }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: .write, queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            // Chromium writes entries in bursts; scan once things settle.
+            self.watchDebounce?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                Task { @MainActor [weak self] in self?.refreshUsage() }
+            }
+            self.watchDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        cacheWatcher = source
     }
 
     /// Scans every profile's cache off the main thread; cheap (small files
@@ -109,15 +152,62 @@ final class AppState: ObservableObject {
         let names = profiles
         let manager = manager
         Task.detached(priority: .utility) {
-            var map: [String: ProfileUsage] = [:]
-            for name in names {
-                if let u = manager.usage(profile: name) { map[name] = u }
+            // One task per profile: the scans are independent file reads.
+            let map = await withTaskGroup(of: (String, ProfileUsage?).self) { group in
+                for name in names {
+                    group.addTask { (name, manager.usage(profile: name)) }
+                }
+                var out: [String: ProfileUsage] = [:]
+                for await (name, usage) in group {
+                    if let usage { out[name] = usage }
+                }
+                return out
             }
             await MainActor.run {
                 self.usage = map
                 self.usageScanRunning = false
                 self.lastUsageScan = Date()
+                self.notifyIfActiveNearlyOut()
             }
+        }
+    }
+
+    // Windows already alerted about, keyed by profile + reset time so each
+    // 5-hour window fires at most once. In-memory on purpose: a relaunch
+    // re-alerting once is fine.
+    private var lowLimitNotified: Set<String> = []
+
+    /// Posts one notification when the active profile's 5-hour window enters
+    /// the red zone (≤10% left), suggesting the freshest other profile;
+    /// clicking the notification switches to it (handled in the app delegate).
+    private func notifyIfActiveNearlyOut() {
+        guard let active = activeProfile,
+              let window = usage[active]?.fiveHour, !window.expired,
+              let resetsAt = window.resetsAt else { return }
+        let remaining = window.remainingPercent
+        guard remaining <= 10 else { return }
+        let key = "\(active)-\(Int(resetsAt.timeIntervalSince1970))"
+        guard !lowLimitNotified.contains(key) else { return }
+        lowLimitNotified.insert(key)
+
+        // Best candidate: the other profile with the most 5h left — only
+        // suggested when comfortably green, otherwise the alert stands alone.
+        var bestName: String?
+        var bestRemaining = 40
+        for name in allProfiles where name != active {
+            if let r = usage[name]?.fiveHourRemaining, r > bestRemaining {
+                bestName = name
+                bestRemaining = r
+            }
+        }
+        let resets = RelativeDateTimeFormatter().localizedString(for: resetsAt, relativeTo: Date())
+        if let bestName {
+            Notifier.post("\(active) is nearly out — \(remaining)% of 5h left",
+                          "Resets \(resets). Click to switch to \(bestName) (\(bestRemaining)% left).",
+                          userInfo: ["switchTo": bestName])
+        } else {
+            Notifier.post("\(active) is nearly out — \(remaining)% of 5h left",
+                          "Resets \(resets).")
         }
     }
 

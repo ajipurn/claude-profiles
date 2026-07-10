@@ -37,6 +37,13 @@ cat > "$APP/Contents/Info.plist" <<EOF
 	<key>CFBundleVersion</key><string>$BUILD</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>LSUIElement</key><true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>dev.local.ClaudeProfiles</string>
+			<key>CFBundleURLSchemes</key><array><string>claudeprofiles</string></array>
+		</dict>
+	</array>
 	<key>NSHumanReadableCopyright</key><string></string>
 </dict>
 </plist>

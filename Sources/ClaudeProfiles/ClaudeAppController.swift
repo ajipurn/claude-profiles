@@ -48,7 +48,9 @@ final class ClaudeAppController {
 }
 
 enum Notifier {
-    static func post(_ title: String, _ body: String = "") {
+    /// `userInfo` rides along to the app's notification delegate — the
+    /// low-limit alert uses it to carry the suggested switch target.
+    static func post(_ title: String, _ body: String = "", userInfo: [AnyHashable: Any] = [:]) {
         // UNUserNotificationCenter requires a real .app bundle; `swift run` has none.
         guard Bundle.main.bundleIdentifier != nil, Bundle.main.bundleURL.pathExtension == "app" else {
             NSLog("[Claude Profiles] %@ — %@", title, body)
@@ -60,6 +62,7 @@ enum Notifier {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
+            content.userInfo = userInfo
             center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
     }

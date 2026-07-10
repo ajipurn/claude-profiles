@@ -35,6 +35,18 @@ public enum UsageReader {
     // Usage responses are ~3 KB; skipping bigger files keeps the scan cheap.
     static let maxEntrySize = 64 * 1024
 
+    /// Parse results keyed by file path, so the 60-second poll only re-reads
+    /// entries whose (mtime, size) changed. `usage == nil` remembers "not a
+    /// usage entry" — the common case for most cache files. Guarded by a lock:
+    /// profiles are scanned concurrently.
+    private struct ParsedEntry {
+        let mtime: Date
+        let size: Int
+        let usage: ProfileUsage?
+    }
+    private static var parsedCache: [String: ParsedEntry] = [:]
+    private static let parsedLock = NSLock()
+
     /// Newest cached usage snapshot in `dir`. When `orgIDs` is non-empty and
     /// any entry matches one of them, only those entries are considered — a
     /// profile's cache can retain responses for orgs it no longer uses.
@@ -46,16 +58,42 @@ public enum UsageReader {
         ) else { return nil }
 
         var found: [ProfileUsage] = []
+        var seen: Set<String> = []
         for file in files where file.lastPathComponent.hasSuffix("_0") {
             guard let values = try? file.resourceValues(forKeys: Set(keys)),
                   let size = values.fileSize, size <= maxEntrySize,
-                  let mtime = values.contentModificationDate,
-                  let data = try? Data(contentsOf: file),
-                  let (org, body) = parseUsageEntry(data),
-                  let parsed = decode(body: body, orgID: org, asOf: mtime)
+                  let mtime = values.contentModificationDate
             else { continue }
-            found.append(parsed)
+            seen.insert(file.path)
+
+            parsedLock.lock()
+            let hit = parsedCache[file.path]
+            parsedLock.unlock()
+            if let hit, hit.mtime == mtime, hit.size == size {
+                if let usage = hit.usage { found.append(usage) }
+                continue
+            }
+
+            let parsed: ProfileUsage?
+            if let data = try? Data(contentsOf: file),
+               let (org, body) = parseUsageEntry(data) {
+                parsed = decode(body: body, orgID: org, asOf: mtime)
+            } else {
+                parsed = nil
+            }
+            parsedLock.lock()
+            parsedCache[file.path] = ParsedEntry(mtime: mtime, size: size, usage: parsed)
+            parsedLock.unlock()
+            if let parsed { found.append(parsed) }
         }
+
+        // Evicted cache files must not pin stale results (or memory).
+        let prefix = cacheDir.path + "/"
+        parsedLock.lock()
+        for key in parsedCache.keys where key.hasPrefix(prefix) && !seen.contains(key) {
+            parsedCache.removeValue(forKey: key)
+        }
+        parsedLock.unlock()
 
         let matching = found.filter { orgIDs.contains($0.orgID) }
         let pool = (orgIDs.isEmpty || matching.isEmpty) ? found : matching

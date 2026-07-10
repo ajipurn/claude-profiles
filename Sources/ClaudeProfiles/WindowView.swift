@@ -20,6 +20,8 @@ struct WindowView: View {
     enum ViewMode: String { case list, grid }
     enum Page { case profiles, settings }
 
+    @AppStorage("autoUpdateCheck") private var autoUpdateCheck = true
+
     var body: some View {
         Group {
             switch state.mode {
@@ -115,6 +117,15 @@ struct WindowView: View {
                     LaunchAtLoginToggle()
                         .padding(.horizontal, 8)
                         .frame(height: 30)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Toggle("Check for updates weekly", isOn: $autoUpdateCheck)
+                            .toggleStyle(RaisedToggleStyle())
+                        Text("The app's only self-initiated network request: GitHub's public releases feed. Nothing about you or your profiles is sent.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(8)
                     ActionRow(icon: "folder", title: "Reveal Profiles in Finder") {
                         state.revealProfilesFolder()
                     }
