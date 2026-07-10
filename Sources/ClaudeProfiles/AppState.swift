@@ -34,6 +34,12 @@ final class AppState: ObservableObject {
 
     init() {
         refresh()
+        // The usage scan is async, so the menu bar's first frame used to
+        // flash the no-data fallback icon. Reading just the active profile's
+        // cache here (a handful of small files) keeps launch on the gauge.
+        if let active = activeProfile, let u = manager.usage(profile: active) {
+            usage[active] = u
+        }
         // Scripts in _cli/bin were written by whichever app version ran setup;
         // rewriting them at launch keeps older installs current (idempotent).
         if cli.isSetUp { try? cli.installShim() }
