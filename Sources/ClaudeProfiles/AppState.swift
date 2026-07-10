@@ -21,6 +21,8 @@ final class AppState: ObservableObject {
     @Published var activeCLIProfile: String?    // nil = default ~/.claude
     @Published var cliSetUp = false
     @Published var cliDefaultHidden = false
+    @Published var usage: [String: ProfileUsage] = [:] // per Desktop profile
+    private var usageScanRunning = false
 
     var claudeAppFound: Bool { claude.appURL != nil }
 
@@ -47,6 +49,11 @@ final class AppState: ObservableObject {
             }
         }
         if !claude.isRunning { relinkSharedHistoryIfEnabled() }
+        // The menu bar shows the active account's remaining 5-hour limit;
+        // Claude refreshes its cached numbers as it runs, so poll them.
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshUsage() }
+        }
     }
 
     func refresh() {
@@ -78,6 +85,26 @@ final class AppState: ObservableObject {
             mode = profiles.isEmpty ? .needsSetup : .ready
         default:
             mode = .ready
+        }
+        refreshUsage()
+    }
+
+    /// Scans every profile's cache off the main thread; cheap (small files
+    /// only) but not free, so runs are coalesced.
+    private func refreshUsage() {
+        guard !usageScanRunning else { return }
+        usageScanRunning = true
+        let names = profiles
+        let manager = manager
+        Task.detached(priority: .utility) {
+            var map: [String: ProfileUsage] = [:]
+            for name in names {
+                if let u = manager.usage(profile: name) { map[name] = u }
+            }
+            await MainActor.run {
+                self.usage = map
+                self.usageScanRunning = false
+            }
         }
     }
 

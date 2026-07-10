@@ -323,6 +323,13 @@ public final class ProfileManager {
         return accountID(of: dir) != nil && !orgIDs(of: dir).isEmpty
     }
 
+    /// Last usage-limit numbers Claude Desktop saw for this profile's account,
+    /// read from the profile's own HTTP cache. Nil when nothing is cached.
+    public func usage(profile name: String) -> ProfileUsage? {
+        let dir = profilesDir.appendingPathComponent(name)
+        return UsageReader.usage(inProfileDir: dir, orgIDs: orgIDs(of: dir))
+    }
+
     /// ownerAccountId from cowork-enabled-cli-ops.json — written on login.
     private func accountID(of profileDir: URL) -> String? {
         guard let data = try? Data(contentsOf: profileDir.appendingPathComponent("cowork-enabled-cli-ops.json")),

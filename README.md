@@ -17,11 +17,12 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 ## Features
 
 - 🔁 **Instant account switching** — one click in the menu bar, ~5 seconds, no login screen
+- 📊 **Usage limits per account** — every profile shows its official session & weekly usage (as of that account's last use), read from Claude's own local cache
 - 🗂 **Shared session history** *(optional)* — all your accounts see one combined sidebar, so nothing "disappears" when you switch
 - ⌨️ **Claude Code (CLI) too** *(optional)* — one list for everything: each profile can be used for Desktop, for `claude` in the terminal, or both
 - ✏️ **Rename & delete profiles** — hover a profile in the panel; deleting a profile = logging that account out
 - 🚀 **Launch at login**, zero setup after the first run
-- 🔒 **Private by design** — no internet access, no analytics, and it never reads your passwords, cookies, or tokens. It only moves folders around on your Mac.
+- 🔒 **Private by design** — no internet access, no analytics, and it never reads your passwords, cookies, or tokens. It only moves folders around on your Mac and reads Claude's own local files.
 
 ## Requirements
 
@@ -104,7 +105,10 @@ The **Default** row is your original `~/.claude` account, untouched — with all
 Because this build isn't notarized (Apple's paid code-review stamp) — not because anything was detected. macOS shows that exact dialog for *every* un-notarized app. See [the install section](#apple-could-not-verify-this-app-is-free-of-malware) for the one-time fix, or build from source to skip it entirely.
 
 **Is this safe? Where does my data go?**
-Everything stays on your Mac. The app is open source, makes zero network requests, and never touches passwords, cookies, or tokens — it only moves and links folders. Your profiles live in `~/Library/Application Support/Claude-Profiles/`, as plain folders you can open in Finder.
+Everything stays on your Mac. The app is open source, makes zero network requests, and never touches passwords, cookies, or tokens — it only moves and links folders, and reads a few of Claude's own local files (its config, and its cache for the usage display). Your profiles live in `~/Library/Application Support/Claude-Profiles/`, as plain folders you can open in Finder.
+
+**Where do the usage numbers come from? Are they live?**
+From Claude itself: Claude Desktop regularly asks claude.ai how much of your limit is used, and keeps the answer in its local cache. The app reads that cache — per profile, fully offline. So the numbers are exactly what that account last saw: near-live for the profile you're using now, older for profiles you haven't opened in a while (the tooltip shows when they were from). Windows whose reset time has passed are dropped rather than shown stale.
 
 **Why does logging in still work after switching?**
 Claude's login encryption key is stored per **app** in your Mac's Keychain, not per account. Every profile folder stays readable by the same Claude app.
@@ -132,7 +136,9 @@ The panel will warn you and switching to any profile fixes the link. Worst case:
 
 ## For developers
 
-Native Swift/SwiftUI, zero dependencies. `~/Library/Application Support/Claude` becomes a symlink into `Claude-Profiles/<name>/`; switching = quit Claude → repoint symlink → relaunch. Shared history merges the per-account session trees (`claude-code-sessions`, `local-agent-mode-sessions`) into `_shared-sessions/` and symlinks every `<account>/<org>` dir to the one with the most files. The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
+Native Swift/SwiftUI, no package dependencies (one vendored C library: zstd's decompress side, in `Sources/CZstd/`, BSD-licensed — Claude's HTTP cache stores bodies zstd-compressed and macOS has no system decoder). `~/Library/Application Support/Claude` becomes a symlink into `Claude-Profiles/<name>/`; switching = quit Claude → repoint symlink → relaunch. Shared history merges the per-account session trees (`claude-code-sessions`, `local-agent-mode-sessions`) into `_shared-sessions/` and symlinks every `<account>/<org>` dir to the one with the most files. The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
+
+The usage display parses the newest cached `GET /api/organizations/<org>/usage` response out of each profile's `Cache/Cache_Data` (Chromium simple-cache entries, zstd bodies). All of that is Anthropic/Chromium internals, so every parse step fails soft — worst case the usage line simply doesn't show.
 
 CLI profiles are plain `CLAUDE_CONFIG_DIR` dirs under `Claude-Profiles/_cli/profiles/`. A `/bin/sh` shim at `_cli/bin/claude` (prepended to PATH) reads the selected name from `_cli/active` at every launch and `exec`s the next `claude` on PATH — an already-exported `CLAUDE_CONFIG_DIR` wins, and macOS Keychain isolation per config dir is Claude Code's own behavior. `_cli/bin/claude-profile` is a second tiny script that rewrites `_cli/active` from the terminal; both are rewritten at every app launch, so they stay current after updates.
 

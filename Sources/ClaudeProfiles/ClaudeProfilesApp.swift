@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import ClaudeProfilesCore
 
 let accent = Color(red: 0.85, green: 0.47, blue: 0.34) // matches the app icon
 
@@ -30,10 +31,14 @@ struct ClaudeProfilesApp: App {
             } else {
                 Image(systemName: "person.crop.circle") // `swift run` has no bundle resources
             }
-            // Which account is active, at a glance — same 2-letter initial as
-            // the panel's Avatar, so the two stay recognizably one identity.
+            // What's left of the active account's 5-hour window, battery-style.
+            // Falls back to the profile's initials when no usage is cached yet.
             if !state.isSwitching, state.mode == .ready, let active = state.activeProfile {
-                Text(Avatar.initials(active))
+                if let remaining = state.usage[active]?.fiveHourRemaining {
+                    MenuBarLevel(remaining: remaining)
+                } else {
+                    Text(Avatar.initials(active))
+                }
             }
         }
         .menuBarExtraStyle(.window)
@@ -50,6 +55,28 @@ struct ClaudeProfilesApp: App {
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 520, height: 660)
+    }
+}
+
+/// Menu bar readout: remaining share of the active account's 5-hour window,
+/// as a number over a tiny level bar (fill = what's left, battery-style).
+struct MenuBarLevel: View {
+    let remaining: Int
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text("\(remaining)%")
+                .font(.system(size: 9, weight: .semibold))
+                .monospacedDigit()
+            Capsule()
+                .fill(.secondary.opacity(0.35))
+                .frame(width: 22, height: 3)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(ProfileUsage.severityColor(usedPercent: Double(100 - remaining)))
+                        .frame(width: max(3, 22 * CGFloat(remaining) / 100))
+                }
+        }
     }
 }
 

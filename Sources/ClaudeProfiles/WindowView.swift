@@ -188,6 +188,7 @@ struct WindowView: View {
                     name: name,
                     subtitle: nil,
                     position: index + 1,
+                    usage: state.usage[name],
                     hasDesktop: state.profiles.contains(name),
                     hasCLI: state.cliCreated.contains(name),
                     desktopActive: name == state.activeProfile,
@@ -233,6 +234,7 @@ struct WindowView: View {
                 WindowProfileCard(
                     name: name,
                     position: index + 1,
+                    usage: state.usage[name],
                     hasDesktop: state.profiles.contains(name),
                     hasCLI: state.cliCreated.contains(name),
                     desktopActive: name == state.activeProfile,
@@ -432,6 +434,88 @@ struct DragPreview: View {
     }
 }
 
+/// Presentation of the cached usage-limit snapshot. Expired windows (reset
+/// time already passed) say nothing about the present and are dropped.
+extension ProfileUsage {
+    private var live: [(label: String, window: Window)] {
+        var out: [(String, Window)] = []
+        if let f = fiveHour, !f.expired { out.append(("5h", f)) }
+        if let s = sevenDay, !s.expired { out.append(("7d", s)) }
+        return out
+    }
+
+    /// True when there is anything current to draw.
+    var hasLiveWindows: Bool { !live.isEmpty }
+
+    /// (label, used-percent) for each window still inside its horizon.
+    var levels: [(label: String, percent: Double)] {
+        live.map { ($0.label, $0.window.percent) }
+    }
+
+    /// Remaining share of the 5-hour window, battery-style. An expired window
+    /// has reset since Claude last looked, so the account is back to 100%.
+    var fiveHourRemaining: Int? {
+        guard let f = fiveHour else { return nil }
+        return f.expired ? 100 : max(0, min(100, 100 - Int(f.percent)))
+    }
+
+    var tooltip: String {
+        let rel = RelativeDateTimeFormatter()
+        var lines: [String] = []
+        if let f = fiveHour, !f.expired {
+            lines.append("Session (5h): \(Int(f.percent))% used"
+                + (f.resetsAt.map { " — resets \(rel.localizedString(for: $0, relativeTo: Date()))" } ?? ""))
+        }
+        if let s = sevenDay, !s.expired {
+            lines.append("Week: \(Int(s.percent))% used"
+                + (s.resetsAt.map { " — resets \(rel.localizedString(for: $0, relativeTo: Date()))" } ?? ""))
+        }
+        lines.append("From Claude's own last check, \(rel.localizedString(for: asOf, relativeTo: Date()))")
+        return lines.joined(separator: "\n")
+    }
+
+    static func severityColor(usedPercent: Double) -> Color {
+        usedPercent >= 90 ? .red : usedPercent >= 70 ? .orange : accent
+    }
+}
+
+/// One thin capsule meter, filled by used share of a limit window.
+struct UsageBar: View {
+    let percent: Double // used, 0–100
+    var width: CGFloat = 40
+
+    var body: some View {
+        Capsule()
+            .fill(Color.primary.opacity(0.09))
+            .frame(width: width, height: 4)
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(ProfileUsage.severityColor(usedPercent: percent))
+                    .frame(width: max(4, width * min(max(percent, 0), 100) / 100))
+            }
+    }
+}
+
+/// The per-profile usage levels: a labeled meter per live window.
+struct UsageLevels: View {
+    let usage: ProfileUsage
+    var barWidth: CGFloat = 40
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(usage.levels, id: \.label) { level in
+                HStack(spacing: 4) {
+                    Text(level.label)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    UsageBar(percent: level.percent, width: barWidth)
+                }
+            }
+        }
+        .help(usage.tooltip)
+    }
+}
+
 /// Rows in a subtle grouped container, macOS-settings style.
 struct GroupBoxList<Content: View>: View {
     @ViewBuilder let content: Content
@@ -449,6 +533,7 @@ struct WindowProfileRow: View {
     let name: String
     let subtitle: String?
     var position: Int? = nil
+    var usage: ProfileUsage? = nil
     let hasDesktop: Bool
     let hasCLI: Bool
     let desktopActive: Bool
@@ -489,6 +574,10 @@ struct WindowProfileRow: View {
                             Text(subtitle)
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
+                        }
+                        if let usage, usage.hasLiveWindows {
+                            UsageLevels(usage: usage, barWidth: 40)
+                                .padding(.top, 1)
                         }
                     }
                     Spacer(minLength: 8)
@@ -548,6 +637,7 @@ struct WindowProfileRow: View {
 struct WindowProfileCard: View {
     let name: String
     var position: Int? = nil
+    var usage: ProfileUsage? = nil
     let hasDesktop: Bool
     let hasCLI: Bool
     let desktopActive: Bool
@@ -569,6 +659,9 @@ struct WindowProfileCard: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(.primary)
+            if let usage, usage.hasLiveWindows {
+                UsageLevels(usage: usage, barWidth: 30)
+            }
             HStack(spacing: 6) {
                 if let onDesktop {
                     ContextIcon(systemName: "macwindow",
