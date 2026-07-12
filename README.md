@@ -66,7 +66,7 @@ After that, a <img src="docs/icon.png" width="14"> person icon appears in your m
 ## Getting started
 
 1. **Click the menu bar icon → "Set Up Profiles…"**
-   Your current Claude login is saved as your first profile (call it anything — "personal", "work", your email…). Nothing moves and Claude keeps running — the folder just gains a name.
+   Your current Claude login is saved as your first profile (call it anything — "personal", "work", your email…). Claude restarts, still logged in. Nothing is lost.
 2. **Click "New Profile"** to add another account.
    This only adds it to the list — your current session keeps running, nothing restarts.
 3. **Switch** by clicking any profile in the list. The first switch to a new profile shows
@@ -123,20 +123,23 @@ Claude Code natively supports separate config folders (`CLAUDE_CONFIG_DIR`), eac
 It logs that account out by removing its saved login. You'd have to log in again next time. With shared history enabled, your session list survives.
 
 **How do I uninstall?**
-Just trash Claude Profiles.app. Your active account already lives exactly where Claude expects it (`~/Library/Application Support/Claude` is a normal folder), so Claude keeps working untouched. Your other profiles stay in `~/Library/Application Support/Claude-Profiles` — keep them, or delete that folder to log those accounts out for good.
+Quit the app, then move your active profile back where Claude expects it:
+
+```
+1. Open Finder → Go → Go to Folder… → ~/Library/Application Support
+2. Delete the "Claude" shortcut (it's just a link, not your data)
+3. Open Claude-Profiles, drag your main profile folder out, rename it to "Claude"
+4. Trash Claude Profiles.app
+```
 
 **Something looks broken.**
-The panel will warn you and switching to any profile fixes it. Every switch is journaled: if anything (even a crash mid-switch) interrupts it, the app finishes or rolls it back at the next launch. Worst case: your data is always intact inside the Claude folder, `Claude-Profiles/`, or the backups — nothing the app does can silently destroy it. It refuses, by design, to ever delete or overwrite a real folder.
+The panel will warn you and switching to any profile fixes the link. Worst case: your data is always intact inside `Claude-Profiles/` and the backups — nothing the app does can silently destroy it. It refuses, by design, to ever delete or overwrite a real folder.
 
 ---
 
 ## For developers
 
-Native Swift/SwiftUI, no package dependencies (one vendored C library: zstd's decompress side, in `Sources/CZstd/`, BSD-licensed — Claude's HTTP cache stores bodies zstd-compressed and macOS has no system decoder). `~/Library/Application Support/Claude` is a **real directory** holding the active profile; inactive profiles are real directories in `Claude-Profiles/`, and a `_active` file records which name the live directory belongs to. Switching = quit Claude → journal the intent → two same-volume `rename(2)` calls (Claude out to the old profile's slot, the new profile in) → relaunch. A crash at any point leaves a state the journal finishes or rolls back at next launch.
-
-Why not symlinks (the app's original design)? Claude's Cowork feature mounts session directories into its VM with `openat2(RESOLVE_NO_SYMLINKS)`, which refuses to traverse *any* symlink — one link anywhere in the active path and every Cowork session fails to start. So the invariant is: **the active profile's paths contain no symlink, ever**. Inactive profiles may be reached through links (they're not mounted); all of those links use relative targets so they still resolve inside the VM's shifted mount root.
-
-Shared history keeps the merged session trees (`claude-code-sessions`, `local-agent-mode-sessions`) *inside the live Claude directory*; inactive profiles symlink theirs to it, and the master `<account>/<org>` dir moves to the active account's slot on every switch (everyone else's org dir is a link to it). The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
+Native Swift/SwiftUI, no package dependencies (one vendored C library: zstd's decompress side, in `Sources/CZstd/`, BSD-licensed — Claude's HTTP cache stores bodies zstd-compressed and macOS has no system decoder). `~/Library/Application Support/Claude` becomes a symlink into `Claude-Profiles/<name>/`; switching = quit Claude → repoint symlink → relaunch. Shared history merges the per-account session trees (`claude-code-sessions`, `local-agent-mode-sessions`) into `_shared-sessions/` and symlinks every `<account>/<org>` dir to the one with the most files. The merge is idempotent and re-runs on every switch, so accounts that log in later join automatically.
 
 The usage display parses the newest cached `GET /api/organizations/<org>/usage` response out of each profile's `Cache/Cache_Data` (Chromium simple-cache entries, zstd bodies). All of that is Anthropic/Chromium internals, so every parse step fails soft — worst case the usage line simply doesn't show.
 
