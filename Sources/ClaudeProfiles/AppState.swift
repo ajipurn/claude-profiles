@@ -33,9 +33,10 @@ final class AppState: ObservableObject {
     var openWindowHandler: (() -> Void)?
 
     init() {
-        // Absolute symlinks from older versions break Cowork's VM (it resolves
-        // them against the guest root). One-time rewrite to relative targets.
-        try? manager.makeSymlinksRelative()
+        // Upgrade pre-1.5 installs: the Claude symlink becomes a real directory
+        // (Cowork's VM refuses to mount through symlinks) and any interrupted
+        // switch is finished or rolled back from its journal.
+        try? manager.migrateLegacyLayoutIfNeeded()
         refresh()
         // The usage scan is async, so the menu bar's first frame used to
         // flash the no-data fallback icon. Reading just the active profile's
@@ -92,7 +93,7 @@ final class AppState: ObservableObject {
         cliSetUp = cli.isSetUp
         cliDefaultHidden = cli.defaultHidden
         let state = manager.claudeDirState()
-        if case .symlink(_, false) = state { brokenLink = true } else { brokenLink = false }
+        if case .legacySymlink(_, false) = state { brokenLink = true } else { brokenLink = false }
         switch state {
         case .realDirectory:
             mode = .needsSetup
@@ -108,26 +109,26 @@ final class AppState: ObservableObject {
     // MARK: - Cache watcher
 
     private var cacheWatcher: DispatchSourceFileSystemObject?
-    private var watchedCachePath: String?
+    private var watchedProfile: String?
     private var watchDebounce: DispatchWorkItem?
 
     /// Kicks a usage rescan whenever Claude writes into the active profile's
     /// HTTP cache directory, so the menu bar tracks in near-realtime instead
     /// of waiting out the 60-second poll (which stays as the fallback — file
     /// rewrites that don't touch the directory entry go unseen here).
+    /// Keyed by profile *name*, not path: the live cache path never changes
+    /// across switches, but the directory behind it does — the old fd would
+    /// keep watching the parked profile.
     private func watchActiveProfileCache() {
-        let path = activeProfile.map {
-            manager.profilesDir.appendingPathComponent($0)
-                .appendingPathComponent("Cache/Cache_Data").path
-        }
-        guard path != watchedCachePath else { return }
+        guard activeProfile != watchedProfile else { return }
         cacheWatcher?.cancel()
         cacheWatcher = nil
-        watchedCachePath = path
-        guard let path else { return }
+        watchedProfile = activeProfile
+        guard activeProfile != nil else { return }
+        let path = manager.claudeDir.appendingPathComponent("Cache/Cache_Data").path
         let fd = open(path, O_EVTONLY)
         guard fd >= 0 else {
-            watchedCachePath = nil // dir not there yet (never logged in) — retry next refresh
+            watchedProfile = nil // dir not there yet (never logged in) — retry next refresh
             return
         }
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -222,16 +223,15 @@ final class AppState: ObservableObject {
             message: "Name for the currently logged-in Claude account.",
             defaultValue: "main"
         ) else { return }
-        run {
-            guard await self.claude.quit() else { return self.abortQuitFailed() }
-            do {
-                try self.manager.migrate(name: name)
-                self.claude.relaunch()
-                Notifier.post("Profiles enabled", "Current account saved as “\(name)”.")
-            } catch {
-                Notifier.post("Setup failed", error.localizedDescription)
-            }
+        // Adoption is pure bookkeeping — the Claude directory stays exactly
+        // where it is, so Claude keeps running through it.
+        do {
+            try manager.migrate(name: name)
+            Notifier.post("Profiles enabled", "Current account saved as “\(name)” — no restart needed.")
+        } catch {
+            Notifier.post("Setup failed", error.localizedDescription)
         }
+        refresh()
     }
 
     func switchTo(_ name: String) {

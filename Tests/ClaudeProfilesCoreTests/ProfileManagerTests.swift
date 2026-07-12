@@ -18,6 +18,9 @@ final class ProfileManagerTests: XCTestCase {
 
     // MARK: - Helpers
 
+    let code = ProfileManager.sessionTrees[0]
+    let agent = ProfileManager.sessionTrees[1]
+
     func write(_ text: String, to url: URL) throws {
         try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try text.write(to: url, atomically: true, encoding: .utf8)
@@ -33,8 +36,33 @@ final class ProfileManagerTests: XCTestCase {
 
     func isSymlink(_ url: URL) -> Bool { itemType(url) == .typeSymbolicLink }
     func isRealDir(_ url: URL) -> Bool { itemType(url) == .typeDirectory }
+    func linkTarget(_ url: URL) -> String? { try? fm.destinationOfSymbolicLink(atPath: url.path) }
 
     func profile(_ name: String) -> URL { pm.profilesDir.appendingPathComponent(name) }
+
+    /// Production org ids are uuids; orgIDs(of:) length-checks for 36 chars.
+    func orgID(_ c: Character) -> String {
+        let q = String(repeating: c, count: 4)
+        return "\(q)\(q)-\(q)-\(q)-\(q)-\(q)\(q)\(q)"
+    }
+
+    func writeIDs(account: String, org: String, into dir: URL) throws {
+        try write(#"{"ownerAccountId":"\#(account)"}"#, to: dir.appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:desk:\#(org)":1}"#, to: dir.appendingPathComponent("config.json"))
+    }
+
+    /// Cowork's mount check: openat2(RESOLVE_NO_SYMLINKS) — no component of
+    /// the path below `root` may be a symlink. The active profile's session
+    /// paths must always satisfy this or Cowork sessions cannot start.
+    func assertNoSymlinkComponents(_ url: URL, file: StaticString = #filePath, line: UInt = #line) {
+        let rootComps = home.standardizedFileURL.pathComponents
+        var cur = home!
+        for c in url.standardizedFileURL.pathComponents[rootComps.count...] {
+            cur = cur.appendingPathComponent(c)
+            XCTAssertFalse(isSymlink(cur), "\(cur.path) is a symlink — Cowork would refuse to mount",
+                           file: file, line: line)
+        }
+    }
 
     // MARK: - Sanitize
 
@@ -42,85 +70,87 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertEqual(ProfileManager.sanitize("My Profile!"), "MyProfile")
         XCTAssertEqual(ProfileManager.sanitize("work-2_a"), "work-2_a")
         XCTAssertEqual(ProfileManager.sanitize("user@example.com"), "user@example.com")
+        XCTAssertEqual(ProfileManager.sanitize("_cli"), "cli", "reserved prefix must be stripped")
+        XCTAssertEqual(ProfileManager.sanitize(".hidden"), "hidden")
         XCTAssertNil(ProfileManager.sanitize(""))
+        XCTAssertNil(ProfileManager.sanitize("..."))
         XCTAssertNil(ProfileManager.sanitize("💥 ééé"))
     }
 
-    // MARK: - Migration
+    // MARK: - Setup (adoption)
 
-    func testMigrationMovesRealDirectoryAndSymlinks() throws {
+    func testMigrateAdoptsClaudeDirInPlace() throws {
         try makeRealClaudeDir()
         try pm.migrate(name: "main")
 
-        XCTAssertTrue(isSymlink(pm.claudeDir))
+        XCTAssertTrue(isRealDir(pm.claudeDir), "Claude must stay a real directory")
         XCTAssertEqual(pm.activeProfile(), "main")
-        XCTAssertEqual(
-            try String(contentsOf: profile("main").appendingPathComponent("Cookies"), encoding: .utf8),
-            "cookie-data"
-        )
-        // Readable through the symlink too.
+        XCTAssertEqual(pm.claudeDirState(), .managed(active: "main"))
+        XCTAssertFalse(fm.fileExists(atPath: profile("main").path),
+                       "the active profile has no directory under Claude-Profiles")
+        XCTAssertEqual(pm.profiles(), ["main"])
         XCTAssertEqual(
             try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
             "cookie-data"
         )
     }
 
-    func testMigrationWithMissingClaudeDirCreatesEmptyProfile() throws {
+    func testMigrateWithMissingClaudeDirCreatesIt() throws {
         try pm.migrate(name: "main")
-        XCTAssertTrue(isSymlink(pm.claudeDir))
-        XCTAssertTrue(isRealDir(profile("main")))
-        XCTAssertEqual(pm.activeProfile(), "main")
-    }
-
-    func testMigrationRejectsExistingProfileName() throws {
-        try fm.createDirectory(at: profile("main"), withIntermediateDirectories: true)
-        try makeRealClaudeDir()
-
-        XCTAssertThrowsError(try pm.migrate(name: "main")) {
-            XCTAssertEqual($0 as? ProfileError, .profileExists("main"))
-        }
-        // Untouched.
         XCTAssertTrue(isRealDir(pm.claudeDir))
-        XCTAssertEqual(
-            try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
-            "cookie-data"
-        )
+        XCTAssertEqual(pm.activeProfile(), "main")
     }
 
-    func testMigrationRejectsInvalidName() throws {
+    func testMigrateGuards() throws {
         try makeRealClaudeDir()
+        try fm.createDirectory(at: profile("dup"), withIntermediateDirectories: true)
+        XCTAssertThrowsError(try pm.migrate(name: "dup")) {
+            XCTAssertEqual($0 as? ProfileError, .profileExists("dup"))
+        }
         XCTAssertThrowsError(try pm.migrate(name: "!!!")) {
             XCTAssertEqual($0 as? ProfileError, .invalidName)
         }
-        XCTAssertTrue(isRealDir(pm.claudeDir))
+        try pm.migrate(name: "main")
+        XCTAssertThrowsError(try pm.migrate(name: "again")) {
+            XCTAssertEqual($0 as? ProfileError, .nothingToMigrate)
+        }
     }
 
     // MARK: - Switching
 
-    func testSwitchRepointsSymlink() throws {
+    func testSwitchSwapsDirectories() throws {
         try makeRealClaudeDir()
         try pm.migrate(name: "main")
         try pm.createProfile(name: "work")
+        try write("work-data", to: profile("work").appendingPathComponent("Cookies"))
 
         try pm.switchTo(name: "work")
         XCTAssertEqual(pm.activeProfile(), "work")
+        XCTAssertTrue(isRealDir(pm.claudeDir), "no symlink anywhere in the live path")
+        XCTAssertEqual(
+            try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
+            "work-data"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: profile("main").appendingPathComponent("Cookies"), encoding: .utf8),
+            "cookie-data", "old profile parked in Claude-Profiles"
+        )
+        XCTAssertFalse(fm.fileExists(atPath: profile("work").path), "new profile's slot vacated")
+        XCTAssertEqual(pm.profiles(), ["main", "work"])
 
         try pm.switchTo(name: "main")
-        XCTAssertEqual(pm.activeProfile(), "main")
         XCTAssertEqual(
             try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
             "cookie-data"
         )
     }
 
-    func testSwitchNeverClobbersRealDirectory() throws {
-        try makeRealClaudeDir()
+    func testSwitchNeverClobbersUnmanagedDirectory() throws {
+        try makeRealClaudeDir() // real dir, never adopted
         try fm.createDirectory(at: profile("work"), withIntermediateDirectories: true)
-
         XCTAssertThrowsError(try pm.switchTo(name: "work")) {
             XCTAssertEqual($0 as? ProfileError, .refusedToClobber(pm.claudeDir.path))
         }
-        XCTAssertTrue(isRealDir(pm.claudeDir))
         XCTAssertEqual(
             try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
             "cookie-data"
@@ -135,128 +165,270 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertEqual(pm.activeProfile(), "main")
     }
 
-    /// Cowork mounts the host disk inside a VM and resolves symlinks against the
-    /// guest root — an absolute /Users/… target dangles there. Every link the app
-    /// writes must therefore be relative.
-    func testClaudeSymlinkTargetIsRelative() throws {
+    func testSwitchInstallsProfileWhenClaudeDirMissing() throws {
+        try pm.migrate(name: "main")
+        try pm.createProfile(name: "work")
+        try fm.removeItem(at: pm.claudeDir)
+        try pm.switchTo(name: "work")
+        XCTAssertEqual(pm.activeProfile(), "work")
+        XCTAssertTrue(isRealDir(pm.claudeDir))
+    }
+
+    func testSwitchReplacesDanglingLegacyLink() throws {
+        try fm.createDirectory(at: profile("work"), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: pm.claudeDir.path,
+                                  withDestinationPath: profile("gone").path)
+        guard case .legacySymlink(_, false) = pm.claudeDirState() else {
+            return XCTFail("expected broken legacy link, got \(pm.claudeDirState())")
+        }
+        try pm.switchTo(name: "work")
+        XCTAssertEqual(pm.activeProfile(), "work")
+        XCTAssertTrue(isRealDir(pm.claudeDir))
+    }
+
+    func testReservedNamesUntouchable() throws {
+        try pm.migrate(name: "main")
+        try fm.createDirectory(at: profile("_cli/profiles"), withIntermediateDirectories: true)
+        XCTAssertThrowsError(try pm.switchTo(name: "_cli")) {
+            XCTAssertEqual($0 as? ProfileError, .profileNotFound("_cli"))
+        }
+        XCTAssertThrowsError(try pm.deleteProfile(name: "_cli")) {
+            XCTAssertEqual($0 as? ProfileError, .profileNotFound("_cli"))
+        }
+        XCTAssertTrue(isRealDir(profile("_cli/profiles")), "_cli must never be touched")
+    }
+
+    // MARK: - Crash recovery
+
+    private func seedForJournal() throws {
+        try write("A", to: pm.claudeDir.appendingPathComponent("Cookies"))
+        try pm.migrate(name: "a")
+        try pm.createProfile(name: "b")
+        try write("B", to: profile("b").appendingPathComponent("Cookies"))
+    }
+
+    private func plantJournal(_ from: String, _ to: String) throws {
+        try write("\(from)\n\(to)\n", to: pm.profilesDir.appendingPathComponent("_switching"))
+    }
+
+    private func claudeCookie() -> String? {
+        try? String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8)
+    }
+
+    func testRepairWhenNothingMoved() throws {
+        try seedForJournal()
+        try plantJournal("a", "b")
+        try pm.repairPendingSwitch()
+        XCTAssertEqual(pm.activeProfile(), "a")
+        XCTAssertFalse(fm.fileExists(atPath: pm.profilesDir.appendingPathComponent("_switching").path))
+    }
+
+    func testRepairRollsForwardAfterFirstRename() throws {
+        try seedForJournal()
+        try plantJournal("a", "b")
+        _ = rename(pm.claudeDir.path, profile("a").path)
+        try pm.repairPendingSwitch()
+        XCTAssertEqual(pm.activeProfile(), "b")
+        XCTAssertEqual(claudeCookie(), "B")
+        XCTAssertEqual(try String(contentsOf: profile("a").appendingPathComponent("Cookies"), encoding: .utf8), "A")
+    }
+
+    func testRepairFinishesBookkeepingAfterBothRenames() throws {
+        try seedForJournal()
+        try plantJournal("a", "b")
+        _ = rename(pm.claudeDir.path, profile("a").path)
+        _ = rename(profile("b").path, pm.claudeDir.path)
+        try pm.repairPendingSwitch()
+        XCTAssertEqual(pm.activeProfile(), "b")
+        XCTAssertEqual(claudeCookie(), "B")
+    }
+
+    func testRepairRollsBackWhenTargetVanished() throws {
+        try seedForJournal()
+        try plantJournal("a", "b")
+        _ = rename(pm.claudeDir.path, profile("a").path)
+        try fm.removeItem(at: profile("b"))
+        try pm.repairPendingSwitch()
+        XCTAssertEqual(pm.activeProfile(), "a")
+        XCTAssertEqual(claudeCookie(), "A")
+    }
+
+    // MARK: - Legacy layout migration
+
+    func testLegacyLayoutMigration() throws {
+        let o1 = orgID("1")
+        let cp = pm.profilesDir
+        for p in ["main", "a", "b"] {
+            try fm.createDirectory(at: cp.appendingPathComponent(p), withIntermediateDirectories: true)
+        }
+        try write("main-data", to: cp.appendingPathComponent("main/Cookies"))
+        try writeIDs(account: "acc01111-0000-4000-8000-000000000006", org: o1, into: cp.appendingPathComponent("main"))
+        // Claude = absolute symlink (the old app's layout)
+        try fm.createSymbolicLink(atPath: pm.claudeDir.path,
+                                  withDestinationPath: cp.appendingPathComponent("main").path)
+        // _shared-sessions with a master, an absolute org link, and the weird
+        // Claude-routed link Claude Desktop itself leaves behind
+        let shared = cp.appendingPathComponent("_shared-sessions")
+        let master = shared.appendingPathComponent("\(code)/acc01111-0000-4000-8000-000000000006/\(o1)")
+        try write("s1", to: master.appendingPathComponent("local_1.json"))
+        let orgLink = shared.appendingPathComponent("\(code)/acc02222-0000-4000-8000-000000000007/org02222-0000-4000-8000-000000000009")
+        try fm.createDirectory(at: orgLink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: orgLink.path, withDestinationPath: master.path)
+        let weird = shared.appendingPathComponent("\(code)/acc03333-0000-4000-8000-000000000008/org03333-0000-4000-8000-00000000000a")
+        try fm.createDirectory(at: weird.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: weird.path,
+                                  withDestinationPath: "../../../../Claude/\(code)/acc01111-0000-4000-8000-000000000006/\(o1)")
+        try fm.createDirectory(at: shared.appendingPathComponent(agent), withIntermediateDirectories: true)
+        for p in ["main", "a", "b"] {
+            for tree in ProfileManager.sessionTrees {
+                try fm.createSymbolicLink(atPath: cp.appendingPathComponent("\(p)/\(tree)").path,
+                                          withDestinationPath: shared.appendingPathComponent(tree).path)
+            }
+        }
+
+        try pm.migrateLegacyLayoutIfNeeded()
+
+        XCTAssertEqual(pm.activeProfile(), "main")
+        XCTAssertTrue(isRealDir(pm.claudeDir))
+        XCTAssertEqual(
+            try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
+            "main-data"
+        )
+        XCTAssertFalse(fm.fileExists(atPath: shared.path), "_shared-sessions removed")
+        XCTAssertTrue(pm.sharedHistoryEnabled)
+        let liveMaster = pm.claudeDir.appendingPathComponent("\(code)/acc01111-0000-4000-8000-000000000006/\(o1)")
+        XCTAssertTrue(isRealDir(liveMaster), "master moved into the live tree")
+        XCTAssertTrue(fm.fileExists(atPath: liveMaster.appendingPathComponent("local_1.json").path))
+        XCTAssertEqual(linkTarget(cp.appendingPathComponent("a/\(code)")), "../../Claude/\(code)")
+        XCTAssertEqual(linkTarget(pm.claudeDir.appendingPathComponent("\(code)/acc02222-0000-4000-8000-000000000007/org02222-0000-4000-8000-000000000009")),
+                       "../acc01111-0000-4000-8000-000000000006/\(o1)")
+        XCTAssertEqual(linkTarget(pm.claudeDir.appendingPathComponent("\(code)/acc03333-0000-4000-8000-000000000008/org03333-0000-4000-8000-00000000000a")),
+                       "../acc01111-0000-4000-8000-000000000006/\(o1)", "Claude-routed legacy link normalized")
+        assertNoSymlinkComponents(liveMaster)
+
+        try pm.migrateLegacyLayoutIfNeeded() // idempotent
+        XCTAssertEqual(pm.activeProfile(), "main")
+    }
+
+    // MARK: - Shared history (new model)
+
+    /// active "main" (acc0main-0000-4000-8000-000000000001) with one session; "a" (acc0aaaa-0000-4000-8000-000000000002) with one; "b" empty.
+    private func seedShared() throws -> (oMain: String, oA: String) {
+        let oMain = orgID("a"), oA = orgID("b")
         try makeRealClaudeDir()
         try pm.migrate(name: "main")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: pm.claudeDir.path),
-                       "Claude-Profiles/main")
-
-        try pm.createProfile(name: "work")
-        try pm.switchTo(name: "work")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: pm.claudeDir.path),
-                       "Claude-Profiles/work")
-        XCTAssertEqual(pm.activeProfile(), "work")
+        try writeIDs(account: "acc0main-0000-4000-8000-000000000001", org: oMain, into: pm.claudeDir)
+        try write("m1", to: pm.claudeDir.appendingPathComponent("\(code)/acc0main-0000-4000-8000-000000000001/\(oMain)/local_1.json"))
+        try pm.createProfile(name: "a")
+        try pm.createProfile(name: "b")
+        try writeIDs(account: "acc0aaaa-0000-4000-8000-000000000002", org: oA, into: profile("a"))
+        try write("a1", to: profile("a").appendingPathComponent("\(code)/acc0aaaa-0000-4000-8000-000000000002/\(oA)/local_2.json"))
+        return (oMain, oA)
     }
 
-    /// Installs from before 1.4.1 left absolute links behind; the launch-time
-    /// repair rewrites them in place without touching what they point at.
-    func testMakeSymlinksRelativeRewritesLegacyAbsoluteLinks() throws {
-        try seedTwoProfiles()
-        try pm.enableSharedHistory()
-        try pm.migrate(name: "main")
-        let code = ProfileManager.sessionTrees[0]
+    func testEnableSharedHistoryMergesIntoLiveTree() throws {
+        let (oMain, oA) = try seedShared()
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+        XCTAssertTrue(backup.lastPathComponent.hasPrefix("claude-session-backup-"))
+        XCTAssertEqual(
+            try String(contentsOf: backup.appendingPathComponent("a/\(code)/acc0aaaa-0000-4000-8000-000000000002/\(oA)/local_2.json"),
+                       encoding: .utf8),
+            "a1"
+        )
 
-        // Recreate the pre-fix world: every link absolute.
-        let absolutes = [
-            (pm.claudeDir, profile("main")),
-            (profile("a").appendingPathComponent(code), pm.sharedDir.appendingPathComponent(code)),
-            (pm.sharedDir.appendingPathComponent("\(code)/acct2/org2"),
-             pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")),
-        ]
-        for (link, dest) in absolutes {
-            try fm.removeItem(at: link)
-            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: dest.path)
+        let liveMaster = pm.claudeDir.appendingPathComponent("\(code)/acc0main-0000-4000-8000-000000000001/\(oMain)")
+        XCTAssertTrue(isRealDir(liveMaster), "master sits at the ACTIVE account's slot")
+        for f in ["local_1.json", "local_2.json"] {
+            XCTAssertTrue(fm.fileExists(atPath: liveMaster.appendingPathComponent(f).path), "\(f) merged")
         }
-
-        XCTAssertEqual(try pm.makeSymlinksRelative(), 3)
-
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: pm.claudeDir.path),
-                       "Claude-Profiles/main")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: absolutes[1].0.path),
-                       "../_shared-sessions/\(code)")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: absolutes[2].0.path),
-                       "../acct1/org1")
-        XCTAssertEqual(pm.activeProfile(), "main")
-        // Still resolves: profile a sees the shared master's files through its link.
+        XCTAssertEqual(linkTarget(profile("a").appendingPathComponent(code)), "../../Claude/\(code)")
+        XCTAssertEqual(linkTarget(pm.claudeDir.appendingPathComponent("\(code)/acc0aaaa-0000-4000-8000-000000000002/\(oA)")),
+                       "../acc0main-0000-4000-8000-000000000001/\(oMain)")
+        assertNoSymlinkComponents(liveMaster)
+        // combined list readable through the inactive profile's own path
         XCTAssertTrue(fm.fileExists(
-            atPath: profile("a").appendingPathComponent("\(code)/acct1/org1/local_1.json").path
+            atPath: profile("a").appendingPathComponent("\(code)/acc0aaaa-0000-4000-8000-000000000002/\(oA)/local_1.json").path
         ))
-        // Idempotent: second run finds nothing left to rewrite.
-        XCTAssertEqual(try pm.makeSymlinksRelative(), 0)
+        XCTAssertNil(try pm.enableSharedHistory(now: Date().addingTimeInterval(60)),
+                     "re-run must be a no-op")
     }
 
-    func testSwitchFixesBrokenSymlink() throws {
-        try pm.migrate(name: "main")
-        try pm.createProfile(name: "work")
-        try pm.switchTo(name: "work")
+    func testSharedSwitchMovesMasterToNewActiveAccount() throws {
+        let (oMain, oA) = try seedShared()
+        _ = try pm.enableSharedHistory()
 
-        try fm.removeItem(at: profile("work")) // symlink now dangling
-
-        guard case .symlink(_, false) = pm.claudeDirState() else {
-            return XCTFail("expected broken symlink, got \(pm.claudeDirState())")
-        }
-        XCTAssertNil(pm.activeProfile())
-
-        try pm.switchTo(name: "main")
-        XCTAssertEqual(pm.activeProfile(), "main")
+        try pm.switchTo(name: "a")
+        let aMaster = pm.claudeDir.appendingPathComponent("\(code)/acc0aaaa-0000-4000-8000-000000000002/\(oA)")
+        XCTAssertTrue(isRealDir(aMaster), "master follows the active account")
+        XCTAssertTrue(fm.fileExists(atPath: aMaster.appendingPathComponent("local_1.json").path))
+        XCTAssertEqual(linkTarget(pm.claudeDir.appendingPathComponent("\(code)/acc0main-0000-4000-8000-000000000001/\(oMain)")),
+                       "../acc0aaaa-0000-4000-8000-000000000002/\(oA)", "old master slot now a link")
+        XCTAssertEqual(linkTarget(profile("main").appendingPathComponent(code)), "../../Claude/\(code)",
+                       "previous active got its tree link")
+        assertNoSymlinkComponents(aMaster)
     }
 
-    // MARK: - Listing
+    func testCreateProfileAndPrelinkAgainstLiveTree() throws {
+        let (_, oA) = try seedShared()
+        _ = try pm.enableSharedHistory()
+        try pm.switchTo(name: "a")
 
-    func testProfilesSkipsUnderscoreAndHiddenDirs() throws {
-        try fm.createDirectory(at: profile("alpha"), withIntermediateDirectories: true)
-        try fm.createDirectory(at: profile("_shared-sessions"), withIntermediateDirectories: true)
-        try fm.createDirectory(at: profile(".hidden"), withIntermediateDirectories: true)
-        try write("x", to: profile("not-a-dir.txt"))
-
-        XCTAssertEqual(pm.profiles(), ["alpha"])
-    }
-
-    // MARK: - New profile + shared trees
-
-    func testCreateProfilePrelinksSharedTrees() throws {
-        for tree in ProfileManager.sessionTrees {
-            try fm.createDirectory(at: pm.sharedDir.appendingPathComponent(tree), withIntermediateDirectories: true)
-        }
         try pm.createProfile(name: "fresh")
+        XCTAssertEqual(linkTarget(profile("fresh").appendingPathComponent(code)), "../../Claude/\(code)")
 
-        for tree in ProfileManager.sessionTrees {
-            let link = profile("fresh").appendingPathComponent(tree)
-            XCTAssertTrue(isSymlink(link), "\(tree) should be pre-linked")
-            XCTAssertEqual(
-                try fm.destinationOfSymbolicLink(atPath: link.path),
-                "../_shared-sessions/\(tree)"
-            )
-        }
+        let oFresh = orgID("c")
+        try writeIDs(account: "acc0fres-0000-4000-8000-000000000003", org: oFresh, into: profile("fresh"))
+        _ = try pm.prelinkKnownAccounts()
+        XCTAssertEqual(linkTarget(pm.claudeDir.appendingPathComponent("\(code)/acc0fres-0000-4000-8000-000000000003/\(oFresh)")),
+                       "../acc0aaaa-0000-4000-8000-000000000002/\(oA)", "inactive account linked to master")
     }
 
-    func testCreateProfileRejectsCollision() throws {
-        try pm.createProfile(name: "dup")
-        XCTAssertThrowsError(try pm.createProfile(name: "dup")) {
-            XCTAssertEqual($0 as? ProfileError, .profileExists("dup"))
+    func testPrelinkGivesActiveAccountARealDir() throws {
+        try pm.migrate(name: "main")
+        for tree in ProfileManager.sessionTrees {
+            try write("x", to: pm.claudeDir.appendingPathComponent("\(tree)/acc0old0-0000-4000-8000-000000000005/org0old0-0000-4000-8000-00000000000b/s.json"))
         }
+        _ = try pm.enableSharedHistory()
+        // the active account logs in only after enabling (Claude writes ids live)
+        let oLive = orgID("d")
+        try writeIDs(account: "acc0live-0000-4000-8000-000000000004", org: oLive, into: pm.claudeDir)
+        _ = try pm.prelinkKnownAccounts()
+        let live = pm.claudeDir.appendingPathComponent("\(code)/acc0live-0000-4000-8000-000000000004/\(oLive)")
+        XCTAssertTrue(isRealDir(live), "the active account's org dir must be real, not a link")
+        assertNoSymlinkComponents(live)
+    }
+
+    func testDisableSharedHistoryGivesEachProfileACopy() throws {
+        let (oMain, oA) = try seedShared()
+        _ = try pm.enableSharedHistory()
+        try pm.disableSharedHistory()
+
+        XCTAssertFalse(pm.sharedHistoryEnabled)
+        // inactive profiles own real trees with the combined copy under their ids
+        let aTree = profile("a").appendingPathComponent(code)
+        XCTAssertTrue(isRealDir(aTree))
+        XCTAssertTrue(fm.fileExists(
+            atPath: aTree.appendingPathComponent("acc0aaaa-0000-4000-8000-000000000002/\(oA)/local_1.json").path
+        ))
+        // the active profile keeps the combined tree it already owns
+        XCTAssertTrue(isRealDir(pm.claudeDir.appendingPathComponent("\(code)/acc0main-0000-4000-8000-000000000001/\(oMain)")))
+    }
+
+    func testDeleteProfileKeepsSharedHistory() throws {
+        let (oMain, _) = try seedShared()
+        _ = try pm.enableSharedHistory()
+        try pm.deleteProfile(name: "a")
+        let master = pm.claudeDir.appendingPathComponent("\(code)/acc0main-0000-4000-8000-000000000001/\(oMain)")
+        XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_2.json").path),
+                      "deleting a profile must not touch the shared sessions")
     }
 
     // MARK: - Rename / delete
 
-    func testRenameInactiveProfile() throws {
-        try pm.migrate(name: "main")
-        try pm.createProfile(name: "work")
-        try write("x", to: profile("work").appendingPathComponent("marker.txt"))
-
-        XCTAssertEqual(try pm.renameProfile("work", to: "office"), "office")
-        XCTAssertTrue(fm.fileExists(atPath: profile("office").appendingPathComponent("marker.txt").path))
-        XCTAssertFalse(fm.fileExists(atPath: profile("work").path))
-        XCTAssertEqual(pm.activeProfile(), "main") // untouched
-    }
-
-    func testRenameActiveProfileRepointsSymlink() throws {
+    func testRenameActiveIsBookkeepingOnly() throws {
         try makeRealClaudeDir()
         try pm.migrate(name: "main")
-        try pm.renameProfile("main", to: "primary")
+        XCTAssertEqual(try pm.renameProfile("main", to: "primary"), "primary")
         XCTAssertEqual(pm.activeProfile(), "primary")
         XCTAssertEqual(
             try String(contentsOf: pm.claudeDir.appendingPathComponent("Cookies"), encoding: .utf8),
@@ -264,11 +436,24 @@ final class ProfileManagerTests: XCTestCase {
         )
     }
 
+    func testRenameInactiveMovesDirectory() throws {
+        try pm.migrate(name: "main")
+        try pm.createProfile(name: "work")
+        try write("x", to: profile("work").appendingPathComponent("marker.txt"))
+        XCTAssertEqual(try pm.renameProfile("work", to: "office"), "office")
+        XCTAssertTrue(fm.fileExists(atPath: profile("office").appendingPathComponent("marker.txt").path))
+        XCTAssertFalse(fm.fileExists(atPath: profile("work").path))
+    }
+
     func testRenameRejectsCollisionAndUnknown() throws {
+        try pm.migrate(name: "active")
         try pm.createProfile(name: "a")
         try pm.createProfile(name: "b")
         XCTAssertThrowsError(try pm.renameProfile("a", to: "b")) {
             XCTAssertEqual($0 as? ProfileError, .profileExists("b"))
+        }
+        XCTAssertThrowsError(try pm.renameProfile("a", to: "active")) {
+            XCTAssertEqual($0 as? ProfileError, .profileExists("active"))
         }
         XCTAssertThrowsError(try pm.renameProfile("ghost", to: "x")) {
             XCTAssertEqual($0 as? ProfileError, .profileNotFound("ghost"))
@@ -279,7 +464,6 @@ final class ProfileManagerTests: XCTestCase {
     func testDeleteProfileRefusesActiveDeletesInactive() throws {
         try pm.migrate(name: "main")
         try pm.createProfile(name: "gone")
-
         XCTAssertThrowsError(try pm.deleteProfile(name: "main")) {
             XCTAssertEqual($0 as? ProfileError, .profileIsActive("main"))
         }
@@ -290,251 +474,108 @@ final class ProfileManagerTests: XCTestCase {
         }
     }
 
-    func testDeleteProfileKeepsSharedHistory() throws {
-        try seedTwoProfiles()
-        try pm.enableSharedHistory()
-        try pm.migrate(name: "main") // makes "main" active so a/b are deletable
+    // MARK: - Listing / order
 
-        try pm.deleteProfile(name: "b")
-        // b's sessions were merged into the shared master before; still there.
-        let master = pm.sharedDir.appendingPathComponent("\(ProfileManager.sessionTrees[0])/acct1/org1")
-        XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_3.json").path),
-                      "deleting a profile must not touch shared history")
+    func testProfilesSkipsUnderscoreAndHiddenDirs() throws {
+        try fm.createDirectory(at: profile("alpha"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: profile("_cli"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: profile(".hidden"), withIntermediateDirectories: true)
+        try write("x", to: profile("not-a-dir.txt"))
+        XCTAssertEqual(pm.profiles(), ["alpha"])
     }
-
-    // MARK: - Shared history
-
-    /// a: acct1/org1 with 2 files (master), b: acct2/org2 with 1 file + an agent tree.
-    func seedTwoProfiles() throws {
-        let code = ProfileManager.sessionTrees[0], agent = ProfileManager.sessionTrees[1]
-        try write("a1", to: profile("a").appendingPathComponent("\(code)/acct1/org1/local_1.json"))
-        try write("a2", to: profile("a").appendingPathComponent("\(code)/acct1/org1/local_2.json"))
-        try write("b1", to: profile("b").appendingPathComponent("\(code)/acct2/org2/local_3.json"))
-        try write("bx", to: profile("b").appendingPathComponent("\(agent)/acct2/org2/agent.json"))
-    }
-
-    func testEnableSharedHistoryMergesLinksAndBacksUp() throws {
-        try seedTwoProfiles()
-        let code = ProfileManager.sessionTrees[0], agent = ProfileManager.sessionTrees[1]
-
-        let backup = try pm.enableSharedHistory()
-
-        // Backup exists and holds the originals.
-        let backupDir = try XCTUnwrap(backup)
-        XCTAssertTrue(backupDir.lastPathComponent.hasPrefix("claude-session-backup-"))
-        XCTAssertEqual(
-            try String(contentsOf: backupDir.appendingPathComponent("b/\(code)/acct2/org2/local_3.json"), encoding: .utf8),
-            "b1"
-        )
-
-        // Every profile tree is now a symlink into _shared-sessions (missing ones
-        // included) — with a relative target, so it resolves inside Cowork's VM too.
-        for profileName in ["a", "b"] {
-            for tree in ProfileManager.sessionTrees {
-                let link = profile(profileName).appendingPathComponent(tree)
-                XCTAssertTrue(isSymlink(link), "\(profileName)/\(tree) should be a symlink")
-                XCTAssertEqual(
-                    try fm.destinationOfSymbolicLink(atPath: link.path),
-                    "../_shared-sessions/\(tree)"
-                )
-            }
-        }
-
-        // Master org dir (acct1/org1, most files) got acct2/org2's file merged in;
-        // acct2/org2 is now a symlink to the master.
-        let sharedCode = pm.sharedDir.appendingPathComponent(code)
-        let master = sharedCode.appendingPathComponent("acct1/org1")
-        XCTAssertTrue(isRealDir(master))
-        for f in ["local_1.json", "local_2.json", "local_3.json"] {
-            XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent(f).path), "\(f) missing in master")
-        }
-        let other = sharedCode.appendingPathComponent("acct2/org2")
-        XCTAssertTrue(isSymlink(other))
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: other.path), "../acct1/org1")
-
-        // All sessions visible through profile b's path (symlink chain).
-        XCTAssertTrue(fm.fileExists(
-            atPath: profile("b").appendingPathComponent("\(code)/acct2/org2/local_1.json").path
-        ))
-
-        // Single org dir in the agent tree: merged, no account-level linking needed.
-        XCTAssertEqual(
-            try String(contentsOf: pm.sharedDir.appendingPathComponent("\(agent)/acct2/org2/agent.json"), encoding: .utf8),
-            "bx"
-        )
-        XCTAssertTrue(pm.sharedHistoryEnabled)
-    }
-
-    func testEnableSharedHistoryNeverOverwrites() throws {
-        let code = ProfileManager.sessionTrees[0]
-        try write("A-version", to: profile("a").appendingPathComponent("\(code)/acct/org/same.json"))
-        try write("B-version", to: profile("b").appendingPathComponent("\(code)/acct/org/same.json"))
-
-        let backup = try XCTUnwrap(try pm.enableSharedHistory())
-
-        // First merge (a, alphabetical) wins; b's copy never overwrites — but survives in backup.
-        XCTAssertEqual(
-            try String(contentsOf: pm.sharedDir.appendingPathComponent("\(code)/acct/org/same.json"), encoding: .utf8),
-            "A-version"
-        )
-        XCTAssertEqual(
-            try String(contentsOf: backup.appendingPathComponent("b/\(code)/acct/org/same.json"), encoding: .utf8),
-            "B-version"
-        )
-    }
-
-    func testHasAccountIDsRequiresBothLoginFiles() throws {
-        let org = "cccccccc-cccc-cccc-cccc-cccccccccccc"
-        try write("x", to: profile("p").appendingPathComponent("placeholder"))
-        XCTAssertFalse(pm.hasAccountIDs(profile: "p"))
-        try write(#"{"ownerAccountId":"acct"}"#, to: profile("p").appendingPathComponent("cowork-enabled-cli-ops.json"))
-        XCTAssertFalse(pm.hasAccountIDs(profile: "p"), "needs org ids too")
-        try write(#"{"dxt:desk:\#(org)":1}"#, to: profile("p").appendingPathComponent("config.json"))
-        XCTAssertTrue(pm.hasAccountIDs(profile: "p"))
-    }
-
-    func testDisableSharedHistoryGivesEachProfileACopy() throws {
-        let code = ProfileManager.sessionTrees[0]
-        let orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        let orgB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        try write("a1", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/one.json"))
-        try write("a2", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/two.json"))
-        try write("b1", to: profile("b").appendingPathComponent("\(code)/acctB/\(orgB)/three.json"))
-        try write(#"{"ownerAccountId":"acctA"}"#, to: profile("a").appendingPathComponent("cowork-enabled-cli-ops.json"))
-        try write(#"{"ownerAccountId":"acctB"}"#, to: profile("b").appendingPathComponent("cowork-enabled-cli-ops.json"))
-        try write(#"{"dxt:desk:\#(orgA)":1}"#, to: profile("a").appendingPathComponent("config.json"))
-        try write(#"{"dxt:desk:\#(orgB)":1}"#, to: profile("b").appendingPathComponent("config.json"))
-
-        try pm.enableSharedHistory()
-        try pm.disableSharedHistory()
-
-        XCTAssertFalse(pm.sharedHistoryEnabled)
-        XCTAssertFalse(fm.fileExists(atPath: pm.sharedDir.path), "shared dir must be removed")
-        // Both profiles own real trees again — with the full combined copy
-        // under their own account/org ids, not links into the removed dir.
-        for (p, acct, org) in [("a", "acctA", orgA), ("b", "acctB", orgB)] {
-            let tree = profile(p).appendingPathComponent(code)
-            XCTAssertTrue(isRealDir(tree), "\(p)'s tree should be a real directory")
-            let orgDir = tree.appendingPathComponent("\(acct)/\(org)")
-            XCTAssertFalse(isSymlink(orgDir))
-            for f in ["one.json", "two.json", "three.json"] {
-                XCTAssertTrue(fm.fileExists(atPath: orgDir.appendingPathComponent(f).path),
-                              "\(p) should keep \(f)")
-            }
-        }
-    }
-
-    func testRerunLinksAccountThatLoggedInAfterEnable() throws {
-        try seedTwoProfiles()
-        try pm.enableSharedHistory()
-
-        // A new account logs in on a fresh profile: Claude writes its org dir
-        // through the profile symlink, i.e. straight into the shared tree.
-        let code = ProfileManager.sessionTrees[0]
-        try write("n1", to: pm.sharedDir.appendingPathComponent("\(code)/acct3/org3/local_9.json"))
-
-        try pm.enableSharedHistory() // re-run on next profile switch
-
-        let master = pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")
-        let newcomer = pm.sharedDir.appendingPathComponent("\(code)/acct3/org3")
-        XCTAssertTrue(isSymlink(newcomer), "new account's org dir should be linked to master")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: newcomer.path), "../acct1/org1")
-        XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_9.json").path))
-    }
-
-    /// An account that logged in but never opened a Code/agent session has no
-    /// <account>/<org> dir — its sidebar would stay empty forever. The uuids Claude
-    /// writes on login (cowork-enabled-cli-ops.json + config.json dxt keys) let the
-    /// merge pre-link the org dir to the master.
-    func testPrelinksAccountThatNeverOpenedASession() throws {
-        try seedTwoProfiles()
-        try pm.enableSharedHistory()
-        try pm.createProfile(name: "fresh")
-
-        // Login writes both ids into the profile — but no session dirs at all.
-        try write(#"{"ownerAccountId":"acct-fresh"}"#,
-                  to: profile("fresh").appendingPathComponent("cowork-enabled-cli-ops.json"))
-        try write(#"{"dxt:allowlistEnabled:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": false}"#,
-                  to: profile("fresh").appendingPathComponent("config.json"))
-
-        try pm.enableSharedHistory() // next relink (switch / Claude quit / app launch)
-
-        let code = ProfileManager.sessionTrees[0]
-        let org = pm.sharedDir
-            .appendingPathComponent("\(code)/acct-fresh/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-        XCTAssertTrue(isSymlink(org), "org dir must be pre-linked to the master")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path), "../acct1/org1")
-        // Combined list readable through the fresh profile's own path.
-        XCTAssertTrue(fm.fileExists(atPath: profile("fresh")
-            .appendingPathComponent("\(code)/acct-fresh/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/local_1.json").path))
-
-        // Idempotent: re-run leaves the link alone.
-        try pm.enableSharedHistory()
-        XCTAssertTrue(isSymlink(org))
-    }
-
-    /// Claude Desktop stays resident in the background, so the quit-time merge may
-    /// never get a window. prelinkKnownAccounts is the symlink-only subset that is
-    /// safe to run while Claude is alive.
-    func testPrelinkKnownAccountsStandalone() throws {
-        try seedTwoProfiles()
-        try pm.enableSharedHistory()
-        try pm.createProfile(name: "fresh")
-        try write(#"{"ownerAccountId":"acct-live"}"#,
-                  to: profile("fresh").appendingPathComponent("cowork-enabled-cli-ops.json"))
-        try write(#"{"dxt:allowlistEnabled:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": false}"#,
-                  to: profile("fresh").appendingPathComponent("config.json"))
-
-        try pm.prelinkKnownAccounts() // no merge — as if Claude were still running
-
-        let code = ProfileManager.sessionTrees[0]
-        let org = pm.sharedDir
-            .appendingPathComponent("\(code)/acct-live/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-        XCTAssertTrue(isSymlink(org))
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path), "../acct1/org1")
-
-        // A pending merge (two real org dirs) makes the master ambiguous — no-op then.
-        try write("x", to: pm.sharedDir.appendingPathComponent("\(code)/acct-other/org-other/local_z.json"))
-        try write(#"{"ownerAccountId":"acct-late"}"#,
-                  to: profile("fresh").appendingPathComponent("cowork-enabled-cli-ops.json"))
-        try pm.prelinkKnownAccounts()
-        XCTAssertFalse(fm.fileExists(atPath: pm.sharedDir.appendingPathComponent("\(code)/acct-late").path),
-                       "must not pick a master while a merge is pending")
-    }
-
-    func testEnableSharedHistoryIsIdempotent() throws {
-        try seedTwoProfiles()
-        XCTAssertNotNil(try pm.enableSharedHistory())
-
-        let secondBackup = try pm.enableSharedHistory(now: Date().addingTimeInterval(60))
-        XCTAssertNil(secondBackup, "re-run must be a no-op")
-
-        let backups = try fm.contentsOfDirectory(atPath: home.path)
-            .filter { $0.hasPrefix("claude-session-backup-") }
-        XCTAssertEqual(backups.count, 1)
-
-        // Structure intact after re-run.
-        let master = pm.sharedDir.appendingPathComponent("\(ProfileManager.sessionTrees[0])/acct1/org1")
-        XCTAssertTrue(isRealDir(master))
-        XCTAssertEqual(
-            try fm.contentsOfDirectory(atPath: master.path).sorted(),
-            ["local_1.json", "local_2.json", "local_3.json"]
-        )
-    }
-
-    // MARK: - Display order
 
     func testOrderedRespectsSavedOrderAndPutsUnknownNamesLast() throws {
         try pm.saveOrder(["charlie", "alpha"])
-        // charlie/alpha follow the saved order; bravo/delta are unknown, so they
-        // sort to the end alphabetically. round-trips through the file on disk.
         XCTAssertEqual(pm.savedOrder(), ["charlie", "alpha"])
         XCTAssertEqual(
             pm.ordered(["alpha", "bravo", "charlie", "delta"]),
             ["charlie", "alpha", "bravo", "delta"]
         )
-        // No file yet on a fresh manager → pure alphabetical.
         let fresh = ProfileManager(home: fm.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         XCTAssertEqual(fresh.ordered(["b", "a"]), ["a", "b"])
+    }
+
+    // MARK: - skills-plugin subtree (non-account data inside the session trees)
+
+    func testSkillsPluginIsNeverConsolidated() throws {
+        let o1 = orgID("1")
+        let a1 = orgID("7")
+        try pm.migrate(name: "main")
+        try writeIDs(account: a1, org: o1, into: pm.claudeDir)
+        try write("s", to: pm.claudeDir.appendingPathComponent("\(agent)/\(a1)/\(o1)/local_1.json"))
+        // healthy skills-plugin: org/account REVERSED order vs sessions, non-uuid root
+        let sp = pm.claudeDir.appendingPathComponent("\(agent)/skills-plugin")
+        try write("SKILL", to: sp.appendingPathComponent("\(o1)/\(a1)/skills/skill.md"))
+
+        _ = try pm.enableSharedHistory()
+        XCTAssertTrue(isRealDir(sp.appendingPathComponent("\(o1)/\(a1)/skills")),
+                      "healthy skills subtree must be untouched")
+        XCTAssertFalse(isSymlink(sp.appendingPathComponent(o1)))
+
+        try pm.createProfile(name: "other")
+        try pm.switchTo(name: "other")
+        let after = pm.claudeDir.appendingPathComponent("\(agent)/skills-plugin/\(o1)/\(a1)/skills")
+        XCTAssertTrue(isRealDir(after), "skills survive a switch intact")
+        assertNoSymlinkComponents(after)
+    }
+
+    func testSkillsPluginRepairAfterWrongConsolidation() throws {
+        let o1 = orgID("2")
+        let a1 = orgID("8")
+        try pm.migrate(name: "main")
+        try writeIDs(account: a1, org: o1, into: pm.claudeDir)
+        let master = pm.claudeDir.appendingPathComponent("\(agent)/\(a1)/\(o1)")
+        try write("s", to: master.appendingPathComponent("local_1.json"))
+        // the damage an earlier consolidation caused: the skills content got
+        // merged INTO the master, and the skills-plugin org dir became a link
+        try write("SKILL", to: master.appendingPathComponent("\(a1)/skills/skill.md"))
+        let sp = pm.claudeDir.appendingPathComponent("\(agent)/skills-plugin")
+        try fm.createDirectory(at: sp, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: sp.appendingPathComponent(o1).path,
+                                  withDestinationPath: "../\(a1)/\(o1)")
+
+        _ = try pm.enableSharedHistory() // normalize runs → repair runs
+
+        let restored = sp.appendingPathComponent("\(o1)/\(a1)/skills")
+        XCTAssertFalse(isSymlink(sp.appendingPathComponent(o1)), "wrong link removed")
+        XCTAssertTrue(isRealDir(restored), "captured skills moved back out of the master")
+        XCTAssertEqual(try String(contentsOf: restored.appendingPathComponent("skill.md"), encoding: .utf8),
+                       "SKILL")
+        XCTAssertFalse(fm.fileExists(atPath: master.appendingPathComponent("\(a1)/skills").path),
+                       "master no longer holds the captured copy")
+        assertNoSymlinkComponents(restored)
+
+        _ = try pm.enableSharedHistory() // idempotent
+        XCTAssertTrue(isRealDir(restored))
+    }
+
+    // MARK: - The Cowork guarantee, end to end
+
+    /// Mirror the whole home under a different root — exactly what Cowork's VM
+    /// sees through virtiofs — and verify the active session path resolves with
+    /// zero symlink components while inactive profiles still resolve via links.
+    func testVMShiftSimulation() throws {
+        let o1 = orgID("e")
+        try makeRealClaudeDir()
+        try pm.migrate(name: "main")
+        try writeIDs(account: "acc01111-0000-4000-8000-000000000006", org: o1, into: pm.claudeDir)
+        try write("s", to: pm.claudeDir.appendingPathComponent("\(code)/acc01111-0000-4000-8000-000000000006/\(o1)/local_1.json"))
+        try pm.createProfile(name: "other")
+        _ = try pm.enableSharedHistory()
+
+        let guest = home.appendingPathComponent("guestmount/shared")
+        try fm.createDirectory(at: guest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.copyItem(at: home.appendingPathComponent("Library"), to: guest)
+
+        let guestSession = guest.appendingPathComponent("Application Support/Claude/\(code)/acc01111-0000-4000-8000-000000000006/\(o1)")
+        var cur = guest
+        for c in guestSession.pathComponents[guest.pathComponents.count...] {
+            cur = cur.appendingPathComponent(c)
+            XCTAssertFalse(isSymlink(cur), "\(cur.path) is a symlink — Cowork would refuse")
+        }
+        XCTAssertTrue(fm.fileExists(atPath: guestSession.appendingPathComponent("local_1.json").path))
+        XCTAssertTrue(fm.fileExists(atPath: guest
+            .appendingPathComponent("Application Support/Claude-Profiles/other/\(code)/acc01111-0000-4000-8000-000000000006/\(o1)/local_1.json").path),
+            "inactive profile's relative chain resolves under the shifted root")
     }
 }
