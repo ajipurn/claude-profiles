@@ -156,7 +156,7 @@ public final class ProfileManager {
             for tree in Self.sessionTrees {
                 let sharedTree = sharedDir.appendingPathComponent(tree)
                 guard isRealDirectory(sharedTree) else { continue }
-                try fm.createSymbolicLink(at: dir.appendingPathComponent(tree), withDestinationURL: sharedTree)
+                try createRelativeSymlink(at: dir.appendingPathComponent(tree), to: sharedTree)
             }
         }
         return name
@@ -230,7 +230,7 @@ public final class ProfileManager {
                     try fm.removeItem(at: link)
                 }
                 // Missing trees get linked too, so future sessions land in the shared tree.
-                try fm.createSymbolicLink(at: link, withDestinationURL: sharedTree)
+                try createRelativeSymlink(at: link, to: sharedTree)
             }
             let master = try consolidateOrgDirs(in: sharedTree)
             try prelinkAccounts(in: sharedTree, master: master, profiles: names)
@@ -307,7 +307,7 @@ public final class ProfileManager {
                 let orgDir = tree.appendingPathComponent(account).appendingPathComponent(org)
                 guard !itemExists(orgDir) else { continue } // real or already linked
                 try fm.createDirectory(at: orgDir.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.createSymbolicLink(at: orgDir, withDestinationURL: master)
+                try createRelativeSymlink(at: orgDir, to: master)
                 created += 1
             }
         }
@@ -354,23 +354,82 @@ public final class ProfileManager {
     // MARK: - Internals
 
     /// Repoint the `Claude` symlink. Never deletes anything that is not a symlink.
-    /// Atomic: the new link is created beside the old one and rename(2)d over it,
-    /// so a crash mid-switch can never leave the path missing or dangling.
     private func pointClaudeDir(at dest: URL) throws {
         switch claudeDirState() {
         case .realDirectory, .otherFile:
             throw ProfileError.refusedToClobber(claudeDir.path)
         case .missing, .symlink:
-            let tmp = claudeDir.deletingLastPathComponent()
-                .appendingPathComponent(".claude-link-\(ProcessInfo.processInfo.processIdentifier)")
+            try replaceWithRelativeLink(at: claudeDir, to: dest)
+        }
+    }
+
+    // Every symlink the app creates uses a *relative* target. Claude's Cowork
+    // feature runs Claude Code in a VM that mounts the host disk under its own
+    // root (/mnt/.virtiofs-root/shared/) and resolves symlinks in the guest —
+    // an absolute /Users/… target dangles there and workspace startup fails
+    // ("SDK version not verified"). Relative targets resolve on both sides.
+
+    /// Atomic replace: the new link is created beside the old one and rename(2)d
+    /// over it, so a crash mid-switch can never leave the path missing or dangling.
+    private func replaceWithRelativeLink(at link: URL, to dest: URL) throws {
+        let tmp = link.deletingLastPathComponent()
+            .appendingPathComponent(".claude-link-\(ProcessInfo.processInfo.processIdentifier)")
+        try? fm.removeItem(at: tmp)
+        try fm.createSymbolicLink(atPath: tmp.path,
+                                  withDestinationPath: relativePath(from: link.deletingLastPathComponent(), to: dest))
+        guard rename(tmp.path, link.path) == 0 else {
+            let err = errno
             try? fm.removeItem(at: tmp)
-            try fm.createSymbolicLink(at: tmp, withDestinationURL: dest)
-            guard rename(tmp.path, claudeDir.path) == 0 else {
-                let err = errno
-                try? fm.removeItem(at: tmp)
-                throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+    }
+
+    private func createRelativeSymlink(at link: URL, to dest: URL) throws {
+        try fm.createSymbolicLink(atPath: link.path,
+                                  withDestinationPath: relativePath(from: link.deletingLastPathComponent(), to: dest))
+    }
+
+    private func relativePath(from base: URL, to dest: URL) -> String {
+        let b = base.standardizedFileURL.pathComponents
+        let d = dest.standardizedFileURL.pathComponents
+        var common = 0
+        while common < min(b.count, d.count), b[common] == d[common] { common += 1 }
+        let path = (Array(repeating: "..", count: b.count - common) + d[common...]).joined(separator: "/")
+        return path.isEmpty ? "." : path
+    }
+
+    /// Rewrite absolute symlinks left behind by older app versions to the relative
+    /// form (see above — absolute targets break Cowork's VM). Returns how many were
+    /// rewritten. Safe while Claude runs: each rewrite is atomic and points at the
+    /// identical destination.
+    @discardableResult
+    public func makeSymlinksRelative() throws -> Int {
+        var fixed = try relinkIfAbsolute(claudeDir)
+        for profile in profiles() {
+            for tree in Self.sessionTrees {
+                fixed += try relinkIfAbsolute(profilesDir.appendingPathComponent(profile).appendingPathComponent(tree))
             }
         }
+        if sharedHistoryEnabled {
+            for tree in Self.sessionTrees {
+                for account in try realSubdirectories(of: sharedDir.appendingPathComponent(tree)) {
+                    for org in (try? fm.contentsOfDirectory(atPath: account.path)) ?? [] {
+                        fixed += try relinkIfAbsolute(account.appendingPathComponent(org))
+                    }
+                }
+            }
+        }
+        return fixed
+    }
+
+    private func relinkIfAbsolute(_ link: URL) throws -> Int {
+        guard isSymlink(link),
+              let raw = try? fm.destinationOfSymbolicLink(atPath: link.path),
+              raw.hasPrefix("/") else { return 0 }
+        let dest = URL(fileURLWithPath: raw).standardizedFileURL
+        guard isRealDirectory(dest) else { return 0 } // dangling — the switch flow repairs those
+        try replaceWithRelativeLink(at: link, to: dest)
+        return 1
     }
 
     /// Recursive copy that never overwrites an existing file.
@@ -409,7 +468,7 @@ public final class ProfileManager {
         for dir in orgDirs where dir != master {
             try merge(contentsOf: dir, into: master)
             try fm.removeItem(at: dir)
-            try fm.createSymbolicLink(at: dir, withDestinationURL: master)
+            try createRelativeSymlink(at: dir, to: master)
         }
         return master
     }

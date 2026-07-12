@@ -33,6 +33,9 @@ final class AppState: ObservableObject {
     var openWindowHandler: (() -> Void)?
 
     init() {
+        // Absolute symlinks from older versions break Cowork's VM (it resolves
+        // them against the guest root). One-time rewrite to relative targets.
+        try? manager.makeSymlinksRelative()
         refresh()
         // The usage scan is async, so the menu bar's first frame used to
         // flash the no-data fallback icon. Reading just the active profile's

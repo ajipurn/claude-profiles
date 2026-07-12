@@ -135,6 +135,59 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertEqual(pm.activeProfile(), "main")
     }
 
+    /// Cowork mounts the host disk inside a VM and resolves symlinks against the
+    /// guest root — an absolute /Users/… target dangles there. Every link the app
+    /// writes must therefore be relative.
+    func testClaudeSymlinkTargetIsRelative() throws {
+        try makeRealClaudeDir()
+        try pm.migrate(name: "main")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: pm.claudeDir.path),
+                       "Claude-Profiles/main")
+
+        try pm.createProfile(name: "work")
+        try pm.switchTo(name: "work")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: pm.claudeDir.path),
+                       "Claude-Profiles/work")
+        XCTAssertEqual(pm.activeProfile(), "work")
+    }
+
+    /// Installs from before 1.4.1 left absolute links behind; the launch-time
+    /// repair rewrites them in place without touching what they point at.
+    func testMakeSymlinksRelativeRewritesLegacyAbsoluteLinks() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+        try pm.migrate(name: "main")
+        let code = ProfileManager.sessionTrees[0]
+
+        // Recreate the pre-fix world: every link absolute.
+        let absolutes = [
+            (pm.claudeDir, profile("main")),
+            (profile("a").appendingPathComponent(code), pm.sharedDir.appendingPathComponent(code)),
+            (pm.sharedDir.appendingPathComponent("\(code)/acct2/org2"),
+             pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")),
+        ]
+        for (link, dest) in absolutes {
+            try fm.removeItem(at: link)
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: dest.path)
+        }
+
+        XCTAssertEqual(try pm.makeSymlinksRelative(), 3)
+
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: pm.claudeDir.path),
+                       "Claude-Profiles/main")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: absolutes[1].0.path),
+                       "../_shared-sessions/\(code)")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: absolutes[2].0.path),
+                       "../acct1/org1")
+        XCTAssertEqual(pm.activeProfile(), "main")
+        // Still resolves: profile a sees the shared master's files through its link.
+        XCTAssertTrue(fm.fileExists(
+            atPath: profile("a").appendingPathComponent("\(code)/acct1/org1/local_1.json").path
+        ))
+        // Idempotent: second run finds nothing left to rewrite.
+        XCTAssertEqual(try pm.makeSymlinksRelative(), 0)
+    }
+
     func testSwitchFixesBrokenSymlink() throws {
         try pm.migrate(name: "main")
         try pm.createProfile(name: "work")
@@ -175,7 +228,7 @@ final class ProfileManagerTests: XCTestCase {
             XCTAssertTrue(isSymlink(link), "\(tree) should be pre-linked")
             XCTAssertEqual(
                 try fm.destinationOfSymbolicLink(atPath: link.path),
-                pm.sharedDir.appendingPathComponent(tree).path
+                "../_shared-sessions/\(tree)"
             )
         }
     }
@@ -274,14 +327,15 @@ final class ProfileManagerTests: XCTestCase {
             "b1"
         )
 
-        // Every profile tree is now a symlink into _shared-sessions (missing ones included).
+        // Every profile tree is now a symlink into _shared-sessions (missing ones
+        // included) — with a relative target, so it resolves inside Cowork's VM too.
         for profileName in ["a", "b"] {
             for tree in ProfileManager.sessionTrees {
                 let link = profile(profileName).appendingPathComponent(tree)
                 XCTAssertTrue(isSymlink(link), "\(profileName)/\(tree) should be a symlink")
                 XCTAssertEqual(
                     try fm.destinationOfSymbolicLink(atPath: link.path),
-                    pm.sharedDir.appendingPathComponent(tree).path
+                    "../_shared-sessions/\(tree)"
                 )
             }
         }
@@ -296,7 +350,7 @@ final class ProfileManagerTests: XCTestCase {
         }
         let other = sharedCode.appendingPathComponent("acct2/org2")
         XCTAssertTrue(isSymlink(other))
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: other.path), master.path)
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: other.path), "../acct1/org1")
 
         // All sessions visible through profile b's path (symlink chain).
         XCTAssertTrue(fm.fileExists(
@@ -384,7 +438,7 @@ final class ProfileManagerTests: XCTestCase {
         let master = pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")
         let newcomer = pm.sharedDir.appendingPathComponent("\(code)/acct3/org3")
         XCTAssertTrue(isSymlink(newcomer), "new account's org dir should be linked to master")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: newcomer.path), master.path)
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: newcomer.path), "../acct1/org1")
         XCTAssertTrue(fm.fileExists(atPath: master.appendingPathComponent("local_9.json").path))
     }
 
@@ -406,11 +460,10 @@ final class ProfileManagerTests: XCTestCase {
         try pm.enableSharedHistory() // next relink (switch / Claude quit / app launch)
 
         let code = ProfileManager.sessionTrees[0]
-        let master = pm.sharedDir.appendingPathComponent("\(code)/acct1/org1")
         let org = pm.sharedDir
             .appendingPathComponent("\(code)/acct-fresh/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         XCTAssertTrue(isSymlink(org), "org dir must be pre-linked to the master")
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path), master.path)
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path), "../acct1/org1")
         // Combined list readable through the fresh profile's own path.
         XCTAssertTrue(fm.fileExists(atPath: profile("fresh")
             .appendingPathComponent("\(code)/acct-fresh/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/local_1.json").path))
@@ -438,8 +491,7 @@ final class ProfileManagerTests: XCTestCase {
         let org = pm.sharedDir
             .appendingPathComponent("\(code)/acct-live/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         XCTAssertTrue(isSymlink(org))
-        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path),
-                       pm.sharedDir.appendingPathComponent("\(code)/acct1/org1").path)
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: org.path), "../acct1/org1")
 
         // A pending merge (two real org dirs) makes the master ambiguous — no-op then.
         try write("x", to: pm.sharedDir.appendingPathComponent("\(code)/acct-other/org-other/local_z.json"))
