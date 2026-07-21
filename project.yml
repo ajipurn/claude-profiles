@@ -17,8 +17,8 @@ targets:
       properties:
         LSUIElement: true
         CFBundleIconFile: AppIcon
-        CFBundleShortVersionString: "1.4.0"
-        CFBundleVersion: "23"
+        CFBundleShortVersionString: "1.4.1"
+        CFBundleVersion: "24"
         CFBundleName: Claude Profiles
         CFBundleDisplayName: Claude Profiles
         NSHumanReadableCopyright: ""

@@ -25,7 +25,7 @@ struct ClaudeProfilesApp: App {
 /// of MenuBarExtra so both mouse buttons work and the panel gets the native
 /// popover chrome.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state = AppState()
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
@@ -136,14 +136,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.toolTip = "Switching profiles…"
         } else if state.mode == .ready, let active = state.activeProfile {
             if let usage = state.usage[active], let remaining = usage.fiveHourRemaining {
-                // In the red zone the readout gains a countdown to the reset —
-                // the number that actually matters once the window is spent.
+                // The numbers are only as fresh as Claude's own last usage
+                // fetch, which can trail the in-app indicator by a while.
+                // Once the snapshot is old (and Claude is running, so a
+                // refresh is at least possible), the readout goes gray and
+                // wears the data's age instead of posing as live.
+                let stale = state.claude.isRunning
+                    && Date().timeIntervalSince(usage.asOf) > Self.staleAfter
                 var suffix: String?
-                if remaining <= 10, let window = usage.fiveHour, !window.expired,
-                   let resetsAt = window.resetsAt, resetsAt > Date() {
+                if stale {
+                    suffix = Self.age(since: usage.asOf)
+                } else if remaining <= 10, let window = usage.fiveHour, !window.expired,
+                          let resetsAt = window.resetsAt, resetsAt > Date() {
+                    // In the red zone the readout gains a countdown to the
+                    // reset — the number that matters once the window is spent.
                     suffix = Self.countdown(to: resetsAt)
                 }
-                button.image = MenuBarLevel.composite(remaining: remaining, suffix: suffix)
+                button.image = MenuBarLevel.composite(remaining: remaining, suffix: suffix, stale: stale)
                 button.toolTip = "\(active)\n\(usage.tooltip)"
             } else {
                 // Same pill, gray "--": this account has no cached numbers yet
@@ -163,6 +172,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return minutes >= 60
             ? "\(minutes / 60)h\(String(format: "%02d", minutes % 60))m"
             : "\(minutes)m"
+    }
+
+    /// Snapshot age beyond which the readout stops posing as live.
+    private static let staleAfter: TimeInterval = 30 * 60
+
+    private static func age(since date: Date) -> String {
+        let minutes = max(1, Int(-date.timeIntervalSinceNow / 60))
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        return hours < 24 ? "\(hours)h ago" : "\(hours / 24)d ago"
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -272,29 +291,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showMainWindow() {
         popover.performClose(nil)
         if mainWindow == nil {
-            // The app stays a menu bar accessory; the Dock icon exists only
-            // while this window is open (the view's own appear handlers flip
-            // the activation policy, same as the old Window scene did).
-            let host = NSHostingController(rootView:
-                WindowView(state: state)
-                    .onAppear {
-                        NSApp.setActivationPolicy(.regular)
-                        NSApp.activate(ignoringOtherApps: true)
-                    }
-                    .onDisappear { NSApp.setActivationPolicy(.accessory) }
-            )
+            let host = NSHostingController(rootView: WindowView(state: state))
             let window = NSWindow(contentViewController: host)
             window.appearance = NSAppearance(named: .darkAqua) // match the panel's dark theme
             window.title = "Claude Profiles"
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.isReleasedWhenClosed = false
+            window.delegate = self
             window.setContentSize(NSSize(width: 520, height: 660))
             window.contentMinSize = NSSize(width: 460, height: 440)
             window.center()
             mainWindow = window
         }
+        // The app stays a menu bar accessory; the Dock icon exists only while
+        // this window is open. SwiftUI's .onDisappear never fires for a
+        // kept-alive window that's merely ordered out (isReleasedWhenClosed =
+        // false), so the policy flip lives here and in windowWillClose instead.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         mainWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Closing the window drops the Dock icon — back to a pure menu bar app.
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 
@@ -337,14 +357,15 @@ enum MenuBarLevel {
     @MainActor private static var cache: [String: NSImage] = [:]
 
     /// `remaining == nil` = no cached usage for this account yet: gray "--"
-    /// and an empty ring instead of the colored gauge.
-    @MainActor static func composite(remaining: Int?, suffix: String? = nil) -> NSImage {
+    /// and an empty ring instead of the colored gauge. `stale` keeps the value
+    /// but drops the traffic-light color — old numbers must not read as live.
+    @MainActor static func composite(remaining: Int?, suffix: String? = nil, stale: Bool = false) -> NSImage {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let key = "text-\(remaining.map(String.init) ?? "nil")-\(suffix ?? "")-\(dark)"
+        let key = "text-\(remaining.map(String.init) ?? "nil")-\(suffix ?? "")-\(stale)-\(dark)"
         if let hit = cache[key] { return hit }
 
         let color: NSColor = {
-            guard let remaining else { return .lightGray }
+            guard let remaining, !stale else { return .lightGray }
             return remaining > 40 ? .systemGreen
                 : remaining > 10 ? .systemYellow : .systemRed
         }()
