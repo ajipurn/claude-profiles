@@ -17,8 +17,8 @@ Claude Desktop only remembers **one** login at a time. Switching accounts normal
 ## Features
 
 - 🔁 **Instant account switching** — one click in the menu bar (or right-click for the quick menu), ~5 seconds, no login screen
-- 📊 **Usage limits per account** — every profile shows its official session & weekly usage (as of that account's last use), read from Claude's own local cache
-- ◐ **Live menu bar gauge** — what's left of the active account's 5-hour window, colored green/yellow/red, updated the moment Claude refreshes its own numbers; in the red it adds a countdown to the reset
+- 📊 **Usage limits per account** — every profile shows its official session & weekly usage (as of that account's last use), read from Claude's own local cache; windows that still count down show the time to their reset
+- ◐ **Live menu bar gauge** — what's left of the active account's 5-hour window, colored green/yellow/red, updated the moment Claude refreshes its own numbers; in the red it adds a countdown to the reset. Claude only refreshes those numbers now and then — when the snapshot is over 30 minutes old the gauge turns gray and shows its age instead of posing as live
 - 🔔 **Low-limit alerts** — under 10% left, a notification suggests your freshest account; clicking it switches immediately
 - 🗂 **Shared session history** *(optional)* — all your accounts see one combined sidebar, so nothing "disappears" when you switch
 - ⌨️ **Claude Code (CLI) too** *(optional)* — one list for everything: each profile can be used for Desktop, for `claude` in the terminal, or both

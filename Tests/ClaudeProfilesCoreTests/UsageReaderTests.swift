@@ -100,6 +100,14 @@ final class UsageReaderTests: XCTestCase {
         XCTAssertFalse(never.expired)
     }
 
+    func testExpiredAtAnExplicitInstant() {
+        let reset = Date(timeIntervalSince1970: 1_000_000)
+        let window = ProfileUsage.Window(percent: 100, resetsAt: reset)
+        XCTAssertFalse(window.expired(at: reset.addingTimeInterval(-1)))
+        XCTAssertTrue(window.expired(at: reset.addingTimeInterval(1)))
+        XCTAssertFalse(ProfileUsage.Window(percent: 100, resetsAt: nil).expired(at: .distantFuture))
+    }
+
     func testNoCacheDirMeansNil() {
         XCTAssertNil(UsageReader.usage(inProfileDir: home.appendingPathComponent("missing")))
     }

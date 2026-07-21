@@ -9,9 +9,11 @@ public struct ProfileUsage: Equatable {
         public let percent: Double
         public let resetsAt: Date?
         /// A window whose reset time has passed says nothing about now.
-        public var expired: Bool {
+        public var expired: Bool { expired(at: Date()) }
+
+        public func expired(at now: Date) -> Bool {
             guard let resetsAt else { return false }
-            return resetsAt < Date()
+            return resetsAt < now
         }
     }
 

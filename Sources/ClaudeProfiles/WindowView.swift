@@ -451,20 +451,35 @@ struct DragPreview: View {
 /// is *remaining* share. An expired window has reset since Claude last looked,
 /// so the account is back to 100%; only never-seen windows draw nothing.
 extension ProfileUsage.Window {
-    var remainingPercent: Int {
-        expired ? 100 : max(0, min(100, 100 - Int(percent)))
+    var remainingPercent: Int { remainingPercent(at: Date()) }
+
+    func remainingPercent(at now: Date) -> Int {
+        expired(at: now) ? 100 : max(0, min(100, 100 - Int(percent)))
+    }
+
+    /// Compact time until this window resets — "42m", "3h09m", "6d23h" — or
+    /// nil when no reset is pending (idle window, or the reset already passed).
+    func resetCountdown(at now: Date) -> String? {
+        guard let resetsAt, resetsAt > now else { return nil }
+        let minutes = max(1, Int(resetsAt.timeIntervalSince(now) / 60))
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 48 { return "\(hours)h\(String(format: "%02d", minutes % 60))m" }
+        return "\(hours / 24)d\(hours % 24)h"
     }
 }
 
 extension ProfileUsage {
     /// True when there is anything to draw (= the account logged in at least once).
-    var hasLiveWindows: Bool { !levels.isEmpty }
+    var hasLiveWindows: Bool { fiveHour != nil || sevenDay != nil }
 
-    /// (label, remaining-percent) per known window.
-    var levels: [(label: String, remaining: Int)] {
-        var out: [(String, Int)] = []
-        if let f = fiveHour { out.append(("5h", f.remainingPercent)) }
-        if let s = sevenDay { out.append(("7d", s.remainingPercent)) }
+    /// (label, remaining-percent, time-to-reset) per known window.
+    var levels: [(label: String, remaining: Int, reset: String?)] { levels(at: Date()) }
+
+    func levels(at now: Date) -> [(label: String, remaining: Int, reset: String?)] {
+        var out: [(String, Int, String?)] = []
+        if let f = fiveHour { out.append(("5h", f.remainingPercent(at: now), f.resetCountdown(at: now))) }
+        if let s = sevenDay { out.append(("7d", s.remainingPercent(at: now), s.resetCountdown(at: now))) }
         return out
     }
 
@@ -513,33 +528,48 @@ struct UsageBar: View {
 
 /// The per-profile usage levels: per known window a labeled meter with the
 /// remaining percent spelled out. `vertical` stacks the windows (grid cards).
+///
+/// The meters depend on the wall clock, not just on `usage`: a spent window
+/// reads 0% until its reset time passes, then 100%. All fields here are
+/// value-equal across scans, so SwiftUI would skip re-rendering right when
+/// that flip happens — TimelineView forces a repaint each minute instead.
 struct UsageLevels: View {
     let usage: ProfileUsage
     var barWidth: CGFloat = 40
     var vertical = false
 
     var body: some View {
-        let layout = vertical
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 3))
-            : AnyLayout(HStackLayout(spacing: 10))
-        layout {
-            ForEach(usage.levels, id: \.label) { level in
-                HStack(spacing: 4) {
-                    Text(level.label)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 13, alignment: .trailing)
-                    UsageBar(remaining: level.remaining, width: barWidth)
-                    Text("\(level.remaining)%")
-                        .font(.system(size: 9, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(ProfileUsage.remainingColor(level.remaining))
-                        // Fixed so bars align across rows ("0%" vs "100%").
-                        .frame(width: 27, alignment: .leading)
+        TimelineView(.everyMinute) { context in
+            let layout = vertical
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 3))
+                : AnyLayout(HStackLayout(spacing: 10))
+            layout {
+                ForEach(usage.levels(at: context.date), id: \.label) { level in
+                    HStack(spacing: 4) {
+                        Text(level.label)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 13, alignment: .trailing)
+                        UsageBar(remaining: level.remaining, width: barWidth)
+                        Text("\(level.remaining)%")
+                            .font(.system(size: 9, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(ProfileUsage.remainingColor(level.remaining))
+                            // Fixed so bars align across rows ("0%" vs "100%").
+                            .frame(width: 27, alignment: .leading)
+                        // At 100% a pending reset means nothing to the reader.
+                        if level.remaining < 100, let reset = level.reset {
+                            Text(reset)
+                                .font(.system(size: 9))
+                                .monospacedDigit()
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                    }
                 }
             }
+            .help(usage.tooltip)
         }
-        .help(usage.tooltip)
     }
 }
 
