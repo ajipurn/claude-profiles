@@ -7,6 +7,7 @@ public enum ProfileError: LocalizedError, Equatable {
     case refusedToClobber(String)
     case nothingToMigrate
     case profileIsActive(String)
+    case invalidBackup(String)
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +23,8 @@ public enum ProfileError: LocalizedError, Equatable {
             return "The Claude directory is already managed; migration is not needed."
         case .profileIsActive(let name):
             return "Profile “\(name)” is active; switch away before deleting it."
+        case .invalidBackup(let name):
+            return "“\(name)” is not a session backup folder (no profile session trees inside)."
         }
     }
 }
@@ -196,27 +199,7 @@ public final class ProfileManager {
         let names = profiles()
 
         // Backup first: copy every real (not yet symlinked) session tree.
-        var realTrees: [(profile: String, tree: String)] = []
-        for profile in names {
-            for tree in Self.sessionTrees
-            where isRealDirectory(profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)) {
-                realTrees.append((profile, tree))
-            }
-        }
-        var backup: URL?
-        if !realTrees.isEmpty {
-            let fmt = DateFormatter()
-            fmt.locale = Locale(identifier: "en_US_POSIX")
-            fmt.dateFormat = "yyyyMMdd-HHmmss"
-            let backupDir = home.appendingPathComponent("claude-session-backup-\(fmt.string(from: now))")
-            for (profile, tree) in realTrees {
-                let src = profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)
-                let dst = backupDir.appendingPathComponent(profile).appendingPathComponent(tree)
-                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.copyItem(at: src, to: dst)
-            }
-            backup = backupDir
-        }
+        let backup = try backupRealTrees(tag: "backup", now: now)
 
         // Merge each profile tree into the shared tree, then symlink it back.
         for tree in Self.sessionTrees {
@@ -266,6 +249,88 @@ public final class ProfileManager {
             }
         }
         try fm.removeItem(at: sharedDir)
+    }
+
+    /// Copy every real (not-yet-symlinked) session tree to
+    /// `~/claude-session-<tag>-<timestamp>/<profile>/<tree>`. Nil when nothing is real
+    /// (everything already symlinked into the shared tree, or no sessions yet).
+    @discardableResult
+    private func backupRealTrees(tag: String, now: Date) throws -> URL? {
+        var realTrees: [(profile: String, tree: String)] = []
+        for profile in profiles() {
+            for tree in Self.sessionTrees
+            where isRealDirectory(profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)) {
+                realTrees.append((profile, tree))
+            }
+        }
+        guard !realTrees.isEmpty else { return nil }
+        let backupDir = home.appendingPathComponent("claude-session-\(tag)-\(timestamp(now))")
+        for (profile, tree) in realTrees {
+            let src = profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)
+            let dst = backupDir.appendingPathComponent(profile).appendingPathComponent(tree)
+            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.copyItem(at: src, to: dst)
+        }
+        return backupDir
+    }
+
+    private func timestamp(_ now: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        return fmt.string(from: now)
+    }
+
+    public struct RestoreResult {
+        /// The current trees, saved before restoring so the restore is itself reversible.
+        public let prerestoreBackup: URL?
+        /// The `_shared-sessions` pile, moved aside. Post-enable sessions live here as one
+        /// undifferentiated set — they cannot be split back per account.
+        public let sharedArchive: URL?
+    }
+
+    /// True per-account rollback: reset every existing profile to its own sessions from
+    /// `backupDir` (a `claude-session-backup-*` written when sharing was enabled). Pre-enable
+    /// history comes back exactly; the shared pile is archived — not deleted, and not
+    /// re-attributed, because sessions made while sharing was on have no per-account origin.
+    /// Needs Claude down, like enable/disable.
+    @discardableResult
+    public func restoreFromBackup(_ backupDir: URL, now: Date = Date()) throws -> RestoreResult {
+        // Reject a stray folder: it must hold at least one <profile>/<sessionTree>.
+        guard isRealDirectory(backupDir),
+              try realSubdirectories(of: backupDir).contains(where: { prof in
+                  Self.sessionTrees.contains { isRealDirectory(prof.appendingPathComponent($0)) }
+              })
+        else { throw ProfileError.invalidBackup(backupDir.lastPathComponent) }
+
+        // Save the current state first so this restore can itself be undone.
+        let prerestore = try backupRealTrees(tag: "prerestore", now: now)
+
+        // Reset each existing profile to the backup's copy — or an empty tree when the
+        // backup predates it (a profile created after sharing was enabled).
+        for name in profiles() {
+            for tree in Self.sessionTrees {
+                let target = profilesDir.appendingPathComponent(name).appendingPathComponent(tree)
+                if itemExists(target) { try fm.removeItem(at: target) } // symlink or real dir
+                let src = backupDir.appendingPathComponent(name).appendingPathComponent(tree)
+                if isRealDirectory(src) {
+                    try fm.copyItem(at: src, to: target)
+                } else {
+                    try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                }
+            }
+        }
+
+        // Archive the combined pile instead of deleting it; this also flips
+        // sharedHistoryEnabled back to false (the shared dir no longer exists).
+        var archive: URL?
+        if isRealDirectory(sharedDir) {
+            let dst = home.appendingPathComponent("claude-shared-archive-\(timestamp(now))")
+            try fm.moveItem(at: sharedDir, to: dst)
+            archive = dst
+        }
+        // ponytail: not transactional across profiles; the prerestore backup is the recovery path.
+        return RestoreResult(prerestoreBackup: prerestore, sharedArchive: archive)
     }
 
     /// Safe while Claude is running: only creates missing symlinks — never merges,

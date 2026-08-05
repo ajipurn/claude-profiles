@@ -470,6 +470,100 @@ final class ProfileManagerTests: XCTestCase {
         )
     }
 
+    // MARK: - Restore from backup
+
+    func testRestoreSeparatesPerAccount() throws {
+        try seedTwoProfiles()
+        let code = ProfileManager.sessionTrees[0], agent = ProfileManager.sessionTrees[1]
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+
+        // A session created while sharing was on lands in the shared master, via a's symlink.
+        try write("post", to: profile("a").appendingPathComponent("\(code)/acct1/org1/post_enable.json"))
+
+        try pm.restoreFromBackup(backup)
+
+        // Sharing is off; the pile is archived (not deleted) with the post-enable session inside.
+        XCTAssertFalse(pm.sharedHistoryEnabled)
+        XCTAssertFalse(fm.fileExists(atPath: pm.sharedDir.path))
+        let archive = try XCTUnwrap(try fm.contentsOfDirectory(atPath: home.path)
+            .first { $0.hasPrefix("claude-shared-archive-") })
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent(archive)
+            .appendingPathComponent("\(code)/acct1/org1/post_enable.json").path))
+
+        // Each profile is a real tree with EXACTLY its own pre-enable sessions — no cross-mixing.
+        let aTree = profile("a").appendingPathComponent(code)
+        XCTAssertTrue(isRealDir(aTree))
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aTree.appendingPathComponent("acct1/org1").path).sorted(),
+                       ["local_1.json", "local_2.json"])
+        XCTAssertFalse(fm.fileExists(atPath: aTree.appendingPathComponent("acct2").path),
+                       "a must not gain b's account")
+        XCTAssertFalse(fm.fileExists(atPath: aTree.appendingPathComponent("acct1/org1/post_enable.json").path),
+                       "post-enable session is archived, not restored")
+
+        let bCode = profile("b").appendingPathComponent(code)
+        XCTAssertTrue(isRealDir(bCode))
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: bCode.appendingPathComponent("acct2/org2").path).sorted(),
+                       ["local_3.json"])
+        XCTAssertTrue(fm.fileExists(atPath: profile("b")
+            .appendingPathComponent("\(agent)/acct2/org2/agent.json").path))
+    }
+
+    func testRestoreGivesEmptyTreeToProfileNotInBackup() throws {
+        try seedTwoProfiles()
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+        try pm.createProfile(name: "c") // created after enable → symlinked, absent from backup
+
+        try pm.restoreFromBackup(backup)
+
+        for tree in ProfileManager.sessionTrees {
+            let cTree = profile("c").appendingPathComponent(tree)
+            XCTAssertTrue(isRealDir(cTree), "c's \(tree) should be a real dir")
+            XCTAssertEqual(try fm.contentsOfDirectory(atPath: cTree.path), [], "and empty")
+        }
+    }
+
+    func testRestoreRejectsInvalidBackup() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+        let bogus = home.appendingPathComponent("not-a-backup")
+        try write("junk", to: bogus.appendingPathComponent("readme.txt"))
+
+        XCTAssertThrowsError(try pm.restoreFromBackup(bogus)) { error in
+            XCTAssertEqual(error as? ProfileError, .invalidBackup("not-a-backup"))
+        }
+        // Nothing touched: sharing still on, profiles still symlinked.
+        XCTAssertTrue(pm.sharedHistoryEnabled)
+        XCTAssertTrue(isSymlink(profile("a").appendingPathComponent(ProfileManager.sessionTrees[0])))
+    }
+
+    func testRestoreBacksUpCurrentRealTreesFirst() throws {
+        // One profile with login ids so disable leaves it a real tree to protect.
+        let code = ProfileManager.sessionTrees[0]
+        let orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        try write("a1", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/one.json"))
+        try write(#"{"ownerAccountId":"acctA"}"#, to: profile("a").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:desk:\#(orgA)":1}"#, to: profile("a").appendingPathComponent("config.json"))
+
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+        try pm.disableSharedHistory()                 // a's tree is a real dir again
+        XCTAssertTrue(isRealDir(profile("a").appendingPathComponent(code)))
+
+        // A session created after disable — only in the live tree, not in the enable-time backup.
+        try write("after", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/after_disable.json"))
+
+        try pm.restoreFromBackup(backup)
+
+        // The prerestore backup captured the live tree (incl. after_disable) → restore is reversible.
+        let prerestore = try XCTUnwrap(try fm.contentsOfDirectory(atPath: home.path)
+            .first { $0.hasPrefix("claude-session-prerestore-") })
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent(prerestore)
+            .appendingPathComponent("a/\(code)/acctA/\(orgA)/after_disable.json").path))
+
+        // And a is back to exactly the enable-time backup (after_disable gone from the live tree).
+        let aOrg = profile("a").appendingPathComponent("\(code)/acctA/\(orgA)")
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aOrg.path).sorted(), ["one.json"])
+    }
+
     // MARK: - Display order
 
     func testOrderedRespectsSavedOrderAndPutsUnknownNamesLast() throws {
