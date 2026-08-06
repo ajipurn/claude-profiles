@@ -234,7 +234,6 @@ final class AppState: ObservableObject {
     func switchTo(_ name: String) {
         run {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
-            self.relinkSharedHistoryIfEnabled()
             do {
                 if !self.manager.profiles().contains(name) {
                     try self.manager.createProfile(name: name) // CLI-only name used for Desktop — dir on demand
@@ -244,6 +243,9 @@ final class AppState: ObservableObject {
             } catch {
                 Notifier.post("Switch failed", error.localizedDescription)
             }
+            // After the switch, so the merge hands the master to the new active
+            // profile (its <account>/<org> becomes the real pile, not a symlink).
+            self.relinkSharedHistoryIfEnabled()
             self.claude.relaunch()
             // A profile that has never logged in can't be prelinked yet (its
             // account/org ids don't exist until Claude writes them at login) —
@@ -426,7 +428,7 @@ final class AppState: ObservableObject {
         run {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
             do {
-                let backup = try self.manager.enableSharedHistory()
+                let backup = try self.manager.enableSharedHistory(promoteActive: true)
                 self.claude.relaunch()
                 Notifier.post("Shared history enabled",
                               backup.map { "Backup: \($0.path)" } ?? "Was already enabled.")
@@ -457,6 +459,44 @@ final class AppState: ObservableObject {
             } catch {
                 self.claude.relaunch()
                 Notifier.post("Disabling failed", error.localizedDescription)
+            }
+        }
+    }
+
+    /// True per-account rollback: pick a `claude-session-backup-*` folder and reset every
+    /// profile to its own pre-enable sessions. The shared pile is archived, not deleted.
+    /// Needs Claude down, like enable/disable.
+    func restoreSharedHistory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = manager.home
+        panel.prompt = "Restore"
+        panel.message = "Pick a claude-session-backup-… folder (created when you turned sharing on)."
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let dir = panel.url else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Restore per-account history from this backup?"
+        alert.informativeText = "Every profile is reset to its own sessions from “\(dir.lastPathComponent)”. "
+            + "Your current session list is archived to your home folder first — nothing is deleted. "
+            + "Sessions created while sharing was on can't be traced to an account, so they are archived, "
+            + "not restored. Claude will restart."
+        alert.addButton(withTitle: "Restore")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        run {
+            guard await self.claude.quit() else { return self.abortQuitFailed() }
+            do {
+                let result = try self.manager.restoreFromBackup(dir)
+                self.claude.relaunch()
+                Notifier.post("History restored",
+                              result.sharedArchive.map { "Shared pile archived to \($0.lastPathComponent)." }
+                                ?? "Each profile restored to its own sessions.")
+            } catch {
+                self.claude.relaunch()
+                Notifier.post("Restore failed", error.localizedDescription)
             }
         }
     }
@@ -569,7 +609,9 @@ final class AppState: ObservableObject {
     /// is why this runs during switches and not on a timer.
     private func relinkSharedHistoryIfEnabled() {
         guard manager.sharedHistoryEnabled else { return }
-        do { try manager.enableSharedHistory() }
+        // promoteActive: hand the master pile to whoever is live now, so Claude
+        // reads/writes a real directory instead of a symlink it could shadow.
+        do { try manager.enableSharedHistory(promoteActive: true) }
         catch { Notifier.post("Session re-link failed", error.localizedDescription) }
     }
 

@@ -82,6 +82,8 @@ By default each account has its own sidebar history. Click **"Share Session Hist
 
 A timestamped backup of your history is saved in your home folder first (`claude-session-backup-…`), so this is safe to try.
 
+**Undoing it.** Turning the toggle off gives every profile a full copy of the combined list (nothing is lost, but the copies then diverge). For a *true* per-account rollback, click **"Restore Session History…"** and pick that `claude-session-backup-…` folder: each profile is reset to exactly its own pre-share sessions. Your current list is archived to `claude-shared-archive-…` first — nothing is deleted. Sessions created *while* sharing was on can't be traced back to one account, so they land in that archive rather than being restored (keep the backup folder if this matters to you).
+
 ### Claude Code (CLI) profiles (optional)
 
 If you also use `claude` in the terminal, the same profiles can switch that account too:

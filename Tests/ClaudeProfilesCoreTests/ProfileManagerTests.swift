@@ -470,6 +470,200 @@ final class ProfileManagerTests: XCTestCase {
         )
     }
 
+    // MARK: - Restore from backup
+
+    func testRestoreSeparatesPerAccount() throws {
+        try seedTwoProfiles()
+        let code = ProfileManager.sessionTrees[0], agent = ProfileManager.sessionTrees[1]
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+
+        // A session created while sharing was on lands in the shared master, via a's symlink.
+        try write("post", to: profile("a").appendingPathComponent("\(code)/acct1/org1/post_enable.json"))
+
+        try pm.restoreFromBackup(backup)
+
+        // Sharing is off; the pile is archived (not deleted) with the post-enable session inside.
+        XCTAssertFalse(pm.sharedHistoryEnabled)
+        XCTAssertFalse(fm.fileExists(atPath: pm.sharedDir.path))
+        let archive = try XCTUnwrap(try fm.contentsOfDirectory(atPath: home.path)
+            .first { $0.hasPrefix("claude-shared-archive-") })
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent(archive)
+            .appendingPathComponent("\(code)/acct1/org1/post_enable.json").path))
+
+        // Each profile is a real tree with EXACTLY its own pre-enable sessions — no cross-mixing.
+        let aTree = profile("a").appendingPathComponent(code)
+        XCTAssertTrue(isRealDir(aTree))
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aTree.appendingPathComponent("acct1/org1").path).sorted(),
+                       ["local_1.json", "local_2.json"])
+        XCTAssertFalse(fm.fileExists(atPath: aTree.appendingPathComponent("acct2").path),
+                       "a must not gain b's account")
+        XCTAssertFalse(fm.fileExists(atPath: aTree.appendingPathComponent("acct1/org1/post_enable.json").path),
+                       "post-enable session is archived, not restored")
+
+        let bCode = profile("b").appendingPathComponent(code)
+        XCTAssertTrue(isRealDir(bCode))
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: bCode.appendingPathComponent("acct2/org2").path).sorted(),
+                       ["local_3.json"])
+        XCTAssertTrue(fm.fileExists(atPath: profile("b")
+            .appendingPathComponent("\(agent)/acct2/org2/agent.json").path))
+    }
+
+    func testRestoreGivesEmptyTreeToProfileNotInBackup() throws {
+        try seedTwoProfiles()
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+        try pm.createProfile(name: "c") // created after enable → symlinked, absent from backup
+
+        try pm.restoreFromBackup(backup)
+
+        for tree in ProfileManager.sessionTrees {
+            let cTree = profile("c").appendingPathComponent(tree)
+            XCTAssertTrue(isRealDir(cTree), "c's \(tree) should be a real dir")
+            XCTAssertEqual(try fm.contentsOfDirectory(atPath: cTree.path), [], "and empty")
+        }
+    }
+
+    func testRestoreRejectsInvalidBackup() throws {
+        try seedTwoProfiles()
+        try pm.enableSharedHistory()
+        let bogus = home.appendingPathComponent("not-a-backup")
+        try write("junk", to: bogus.appendingPathComponent("readme.txt"))
+
+        XCTAssertThrowsError(try pm.restoreFromBackup(bogus)) { error in
+            XCTAssertEqual(error as? ProfileError, .invalidBackup("not-a-backup"))
+        }
+        // Nothing touched: sharing still on, profiles still symlinked.
+        XCTAssertTrue(pm.sharedHistoryEnabled)
+        XCTAssertTrue(isSymlink(profile("a").appendingPathComponent(ProfileManager.sessionTrees[0])))
+    }
+
+    func testRestoreBacksUpCurrentRealTreesFirst() throws {
+        // One profile with login ids so disable leaves it a real tree to protect.
+        let code = ProfileManager.sessionTrees[0]
+        let orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        try write("a1", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/one.json"))
+        try write(#"{"ownerAccountId":"acctA"}"#, to: profile("a").appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:desk:\#(orgA)":1}"#, to: profile("a").appendingPathComponent("config.json"))
+
+        let backup = try XCTUnwrap(try pm.enableSharedHistory())
+        try pm.disableSharedHistory()                 // a's tree is a real dir again
+        XCTAssertTrue(isRealDir(profile("a").appendingPathComponent(code)))
+
+        // A session created after disable — only in the live tree, not in the enable-time backup.
+        try write("after", to: profile("a").appendingPathComponent("\(code)/acctA/\(orgA)/after_disable.json"))
+
+        try pm.restoreFromBackup(backup)
+
+        // The prerestore backup captured the live tree (incl. after_disable) → restore is reversible.
+        let prerestore = try XCTUnwrap(try fm.contentsOfDirectory(atPath: home.path)
+            .first { $0.hasPrefix("claude-session-prerestore-") })
+        XCTAssertTrue(fm.fileExists(atPath: home.appendingPathComponent(prerestore)
+            .appendingPathComponent("a/\(code)/acctA/\(orgA)/after_disable.json").path))
+
+        // And a is back to exactly the enable-time backup (after_disable gone from the live tree).
+        let aOrg = profile("a").appendingPathComponent("\(code)/acctA/\(orgA)")
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aOrg.path).sorted(), ["one.json"])
+    }
+
+    // MARK: - Switch + shared-history visibility
+
+    struct Acct { let profile: String; let acct: String; let org: String }
+
+    func login(_ a: Acct) throws {
+        try write(#"{"ownerAccountId":"\#(a.acct)"}"#,
+                  to: profile(a.profile).appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:desk:\#(a.org)":1}"#,
+                  to: profile(a.profile).appendingPathComponent("config.json"))
+    }
+
+    /// Simulate Claude (active account `a`) creating a session: writes through the
+    /// live Claude symlink exactly as the app does — claudeDir -> profile -> shared tree.
+    func claudeWrite(_ uuid: String, as a: Acct) throws {
+        let p = pm.claudeDir.appendingPathComponent(
+            "\(ProfileManager.sessionTrees[0])/\(a.acct)/\(a.org)/\(uuid)")
+        try write("session", to: p)
+    }
+
+    /// Mirror the switch flow: switch first, then relink promoting the now-active
+    /// account to master (as AppState.switchTo does after the fix).
+    func appSwitch(to a: Acct) throws {
+        if !pm.profiles().contains(a.profile) { try pm.createProfile(name: a.profile) }
+        try pm.switchTo(name: a.profile)
+        if pm.sharedHistoryEnabled { try pm.enableSharedHistory(promoteActive: true) }
+    }
+
+    func activeOrg(_ a: Acct) -> URL {
+        pm.claudeDir.appendingPathComponent("\(ProfileManager.sessionTrees[0])/\(a.acct)/\(a.org)")
+    }
+
+    /// Sessions the active account's sidebar can actually see (its org path, symlinks resolved).
+    func visibleSessions(_ a: Acct) -> Set<String> {
+        let items = (try? fm.contentsOfDirectory(atPath: activeOrg(a).resolvingSymlinksInPath().path)) ?? []
+        return Set(items)
+    }
+
+    /// Switching to any profile must hand it the real master pile — never a symlink
+    /// Claude's own writes could shadow (the "session hilang after switch" bug) — and
+    /// every shared session stays visible through it.
+    func testSwitchGivesActiveProfileTheRealMasterAndKeepsSessionsVisible() throws {
+        let main = Acct(profile: "main", acct: "acct-main", org: "11111111-1111-1111-1111-111111111111")
+        let work = Acct(profile: "work", acct: "acct-work", org: "22222222-2222-2222-2222-222222222222")
+        let other = Acct(profile: "other", acct: "acct-other", org: "33333333-3333-3333-3333-333333333333")
+
+        try makeRealClaudeDir()
+        try pm.migrate(name: main.profile)          // main active
+        for a in [main, work, other] {
+            if a.profile != main.profile { try pm.createProfile(name: a.profile) }
+            try login(a)
+        }
+        // Seed main heavily so the file-count master is main's org, not work/other's:
+        // without master-follows-active they would run on a symlink to it.
+        var all: Set<String> = []
+        for i in 0..<5 { try claudeWrite("s-main-\(i)", as: main); all.insert("s-main-\(i)") }
+        try pm.enableSharedHistory(promoteActive: true)
+
+        let seq = [work, other, main, work, other, work, main, other]
+        for (i, next) in seq.enumerated() {
+            try appSwitch(to: next)
+            let id = "s-\(next.profile)-\(i + 1)"
+            try claudeWrite(id, as: next); all.insert(id)
+
+            XCTAssertTrue(isRealDir(activeOrg(next)),
+                "switch #\(i + 1): \(next.profile)'s org dir must be the real master, not a symlink")
+            let visible = visibleSessions(next)
+            XCTAssertEqual(visible, all,
+                "switch #\(i + 1) to \(next.profile): missing \(all.subtracting(visible))")
+        }
+    }
+
+    /// An account that logged in and opened a session before it was linked owns a
+    /// real "island" of its own sessions, disconnected from the shared pile. The
+    /// next promoting relink must fold the pile into it — nothing lost, all visible.
+    func testPromotingRelinkHealsAnIslandedAccount() throws {
+        let main = Acct(profile: "main", acct: "acct-main", org: "11111111-1111-1111-1111-111111111111")
+        let work = Acct(profile: "work", acct: "acct-work", org: "22222222-2222-2222-2222-222222222222")
+
+        try makeRealClaudeDir()
+        try pm.migrate(name: main.profile)
+        try pm.createProfile(name: work.profile)
+        try login(main); try login(work)
+        try claudeWrite("m1", as: main)
+        try claudeWrite("m2", as: main)
+        try pm.enableSharedHistory(promoteActive: true)   // master = main's org
+
+        // work is now active but its org dir is a fresh real island Claude wrote
+        // before any relink saw it (the first-login / new-org window).
+        try pm.switchTo(name: work.profile)
+        let island = activeOrg(work)
+        try fm.removeItem(at: island)                      // drop the prelinked symlink
+        try write("w1", to: island.appendingPathComponent("w1"))
+
+        try pm.enableSharedHistory(promoteActive: true)    // heal
+
+        XCTAssertTrue(isRealDir(island), "work must own the real master after the relink")
+        XCTAssertEqual(Set(try fm.contentsOfDirectory(atPath: island.path)),
+                       ["m1", "m2", "w1"], "island folded into the shared pile, nothing lost")
+    }
+
     // MARK: - Display order
 
     func testOrderedRespectsSavedOrderAndPutsUnknownNamesLast() throws {

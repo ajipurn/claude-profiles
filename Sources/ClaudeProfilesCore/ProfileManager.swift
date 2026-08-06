@@ -7,6 +7,7 @@ public enum ProfileError: LocalizedError, Equatable {
     case refusedToClobber(String)
     case nothingToMigrate
     case profileIsActive(String)
+    case invalidBackup(String)
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +23,8 @@ public enum ProfileError: LocalizedError, Equatable {
             return "The Claude directory is already managed; migration is not needed."
         case .profileIsActive(let name):
             return "Profile “\(name)” is active; switch away before deleting it."
+        case .invalidBackup(let name):
+            return "“\(name)” is not a session backup folder (no profile session trees inside)."
         }
     }
 }
@@ -191,32 +194,20 @@ public final class ProfileManager {
 
     /// Merge every profile's session trees into `_shared-sessions` and symlink them back.
     /// Returns the backup directory, or nil when there was nothing to migrate (idempotent re-run).
+    ///
+    /// `promoteActive` makes the live account own the master: its `<account>/<org>`
+    /// becomes the real session pile and every other account links to it. Claude
+    /// then always reads and writes a real directory, never a symlink its own
+    /// writes could shadow with a fresh (empty) one — the cause of sessions
+    /// vanishing from the sidebar after a switch. Callers that run at a known-idle
+    /// moment (switch, Claude quit, launch) pass true; tests default to false.
     @discardableResult
-    public func enableSharedHistory(now: Date = Date()) throws -> URL? {
+    public func enableSharedHistory(now: Date = Date(), promoteActive: Bool = false) throws -> URL? {
         let names = profiles()
+        let active = promoteActive ? activeProfile() : nil
 
         // Backup first: copy every real (not yet symlinked) session tree.
-        var realTrees: [(profile: String, tree: String)] = []
-        for profile in names {
-            for tree in Self.sessionTrees
-            where isRealDirectory(profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)) {
-                realTrees.append((profile, tree))
-            }
-        }
-        var backup: URL?
-        if !realTrees.isEmpty {
-            let fmt = DateFormatter()
-            fmt.locale = Locale(identifier: "en_US_POSIX")
-            fmt.dateFormat = "yyyyMMdd-HHmmss"
-            let backupDir = home.appendingPathComponent("claude-session-backup-\(fmt.string(from: now))")
-            for (profile, tree) in realTrees {
-                let src = profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)
-                let dst = backupDir.appendingPathComponent(profile).appendingPathComponent(tree)
-                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.copyItem(at: src, to: dst)
-            }
-            backup = backupDir
-        }
+        let backup = try backupRealTrees(tag: "backup", now: now)
 
         // Merge each profile tree into the shared tree, then symlink it back.
         for tree in Self.sessionTrees {
@@ -232,10 +223,27 @@ public final class ProfileManager {
                 // Missing trees get linked too, so future sessions land in the shared tree.
                 try fm.createSymbolicLink(at: link, withDestinationURL: sharedTree)
             }
-            let master = try consolidateOrgDirs(in: sharedTree)
+            let preferred = active.flatMap { activeOrgDir(in: sharedTree, profile: $0) }
+            let master = try consolidateOrgDirs(in: sharedTree, preferred: preferred)
             try prelinkAccounts(in: sharedTree, master: master, profiles: names)
         }
         return backup
+    }
+
+    /// The active account's `<account>/<org>` path inside `tree`, once Claude has
+    /// recorded its ids. With several orgs, prefer one that already holds real
+    /// sessions (the one Claude just used), else any that exists, else the first —
+    /// whichever we pick becomes the real master and the rest link to it, so every
+    /// org of the account still resolves to the pile.
+    private func activeOrgDir(in tree: URL, profile name: String) -> URL? {
+        let dir = profilesDir.appendingPathComponent(name)
+        guard let account = accountID(of: dir) else { return nil }
+        let orgs = orgIDs(of: dir).sorted()
+        guard !orgs.isEmpty else { return nil }
+        let candidates = orgs.map { tree.appendingPathComponent(account).appendingPathComponent($0) }
+        return candidates.first(where: isRealDirectory)
+            ?? candidates.first(where: itemExists)
+            ?? candidates.first
     }
 
     /// Undo sharing. Merged sessions cannot be split back per account, so the
@@ -266,6 +274,88 @@ public final class ProfileManager {
             }
         }
         try fm.removeItem(at: sharedDir)
+    }
+
+    /// Copy every real (not-yet-symlinked) session tree to
+    /// `~/claude-session-<tag>-<timestamp>/<profile>/<tree>`. Nil when nothing is real
+    /// (everything already symlinked into the shared tree, or no sessions yet).
+    @discardableResult
+    private func backupRealTrees(tag: String, now: Date) throws -> URL? {
+        var realTrees: [(profile: String, tree: String)] = []
+        for profile in profiles() {
+            for tree in Self.sessionTrees
+            where isRealDirectory(profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)) {
+                realTrees.append((profile, tree))
+            }
+        }
+        guard !realTrees.isEmpty else { return nil }
+        let backupDir = home.appendingPathComponent("claude-session-\(tag)-\(timestamp(now))")
+        for (profile, tree) in realTrees {
+            let src = profilesDir.appendingPathComponent(profile).appendingPathComponent(tree)
+            let dst = backupDir.appendingPathComponent(profile).appendingPathComponent(tree)
+            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.copyItem(at: src, to: dst)
+        }
+        return backupDir
+    }
+
+    private func timestamp(_ now: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        return fmt.string(from: now)
+    }
+
+    public struct RestoreResult {
+        /// The current trees, saved before restoring so the restore is itself reversible.
+        public let prerestoreBackup: URL?
+        /// The `_shared-sessions` pile, moved aside. Post-enable sessions live here as one
+        /// undifferentiated set — they cannot be split back per account.
+        public let sharedArchive: URL?
+    }
+
+    /// True per-account rollback: reset every existing profile to its own sessions from
+    /// `backupDir` (a `claude-session-backup-*` written when sharing was enabled). Pre-enable
+    /// history comes back exactly; the shared pile is archived — not deleted, and not
+    /// re-attributed, because sessions made while sharing was on have no per-account origin.
+    /// Needs Claude down, like enable/disable.
+    @discardableResult
+    public func restoreFromBackup(_ backupDir: URL, now: Date = Date()) throws -> RestoreResult {
+        // Reject a stray folder: it must hold at least one <profile>/<sessionTree>.
+        guard isRealDirectory(backupDir),
+              try realSubdirectories(of: backupDir).contains(where: { prof in
+                  Self.sessionTrees.contains { isRealDirectory(prof.appendingPathComponent($0)) }
+              })
+        else { throw ProfileError.invalidBackup(backupDir.lastPathComponent) }
+
+        // Save the current state first so this restore can itself be undone.
+        let prerestore = try backupRealTrees(tag: "prerestore", now: now)
+
+        // Reset each existing profile to the backup's copy — or an empty tree when the
+        // backup predates it (a profile created after sharing was enabled).
+        for name in profiles() {
+            for tree in Self.sessionTrees {
+                let target = profilesDir.appendingPathComponent(name).appendingPathComponent(tree)
+                if itemExists(target) { try fm.removeItem(at: target) } // symlink or real dir
+                let src = backupDir.appendingPathComponent(name).appendingPathComponent(tree)
+                if isRealDirectory(src) {
+                    try fm.copyItem(at: src, to: target)
+                } else {
+                    try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                }
+            }
+        }
+
+        // Archive the combined pile instead of deleting it; this also flips
+        // sharedHistoryEnabled back to false (the shared dir no longer exists).
+        var archive: URL?
+        if isRealDirectory(sharedDir) {
+            let dst = home.appendingPathComponent("claude-shared-archive-\(timestamp(now))")
+            try fm.moveItem(at: sharedDir, to: dst)
+            archive = dst
+        }
+        // ponytail: not transactional across profiles; the prerestore backup is the recovery path.
+        return RestoreResult(prerestoreBackup: prerestore, sharedArchive: archive)
     }
 
     /// Safe while Claude is running: only creates missing symlinks — never merges,
@@ -388,28 +478,65 @@ public final class ProfileManager {
         }
     }
 
-    /// Inside a shared tree, pick the <account>/<org> dir with the most files as master,
-    /// merge every other real org dir into it, and symlink them to the master.
-    /// Returns the master (the tree's single remaining real org dir), if any.
+    /// Collapse a shared tree to a single real `<account>/<org>` master with every
+    /// other org dir symlinked to it. The master is `preferred` (the active
+    /// account's org dir) when given — relocated there so the live Claude owns a
+    /// real pile — otherwise the real dir with the most files. Returns the master.
+    ///
+    /// The final pass points every other org entry straight at the master: real
+    /// islands (a fresh dir Claude wrote before it was linked) are merged in, and
+    /// stale/looping symlinks are re-pointed — so a moved master never leaves a
+    /// broken link or a growing symlink chain behind.
     @discardableResult
-    private func consolidateOrgDirs(in tree: URL) throws -> URL? {
-        var orgDirs: [URL] = []
-        for account in try realSubdirectories(of: tree) {
-            orgDirs.append(contentsOf: try realSubdirectories(of: account))
+    private func consolidateOrgDirs(in tree: URL, preferred: URL? = nil) throws -> URL? {
+        // Every <account>/<org> entry, real dirs and symlinks alike.
+        func orgEntries() throws -> [URL] {
+            var out: [URL] = []
+            for account in try realSubdirectories(of: tree) {
+                for name in (try? fm.contentsOfDirectory(atPath: account.path)) ?? [] {
+                    let u = account.appendingPathComponent(name)
+                    if isRealDirectory(u) || isSymlink(u) { out.append(u) }
+                }
+            }
+            return out
         }
-        guard orgDirs.count > 1 else { return orgDirs.first }
 
-        orgDirs.sort { $0.path < $1.path } // deterministic tie-break
-        var master = orgDirs[0]
-        var bestCount = fileCount(in: master)
-        for dir in orgDirs.dropFirst() {
+        let realOrgs = try orgEntries().filter(isRealDirectory).sorted { $0.path < $1.path }
+        guard !realOrgs.isEmpty else { return nil }
+
+        // The pile: real dir with the most files (deterministic tie-break by path).
+        var pile = realOrgs[0]
+        var bestCount = fileCount(in: pile)
+        for dir in realOrgs.dropFirst() {
             let count = fileCount(in: dir)
-            if count > bestCount { master = dir; bestCount = count }
+            if count > bestCount { pile = dir; bestCount = count }
         }
-        for dir in orgDirs where dir != master {
-            try merge(contentsOf: dir, into: master)
-            try fm.removeItem(at: dir)
-            try fm.createSymbolicLink(at: dir, withDestinationURL: master)
+
+        // Master follows the active account: relocate the pile into its org dir,
+        // leaving a symlink where the pile used to be so old accounts still resolve.
+        // Fold any island already at `preferred` into the pile first, then move the
+        // pile wholesale — so none of the pile's files can be lost to a name clash.
+        var master = pile
+        if let preferred, preferred.path != pile.path {
+            if isRealDirectory(preferred) { try merge(contentsOf: preferred, into: pile) }
+            if itemExists(preferred) { try fm.removeItem(at: preferred) } // island dir or stale symlink
+            try fm.createDirectory(at: preferred.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: pile, to: preferred)
+            try fm.createSymbolicLink(at: pile, withDestinationURL: preferred)
+            master = preferred
+        }
+
+        // ponytail: rewrites all links every relink (O(accounts)); fine at this scale.
+        for entry in try orgEntries() where entry.path != master.path {
+            if isRealDirectory(entry) {
+                try merge(contentsOf: entry, into: master)
+                try fm.removeItem(at: entry)
+            } else if (try? fm.destinationOfSymbolicLink(atPath: entry.path)) == master.path {
+                continue // already points straight at the master
+            } else {
+                try fm.removeItem(at: entry)
+            }
+            try fm.createSymbolicLink(at: entry, withDestinationURL: master)
         }
         return master
     }

@@ -93,6 +93,10 @@ struct WindowView: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 7)
+                    ActionRow(icon: "arrow.uturn.backward", title: "Restore Session History…",
+                              disabled: !state.claudeAppFound || state.isSwitching) {
+                        state.restoreSharedHistory()
+                    }
                 }
 
                 SectionLabel("Claude Code (CLI)")
