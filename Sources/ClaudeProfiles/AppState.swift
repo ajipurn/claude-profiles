@@ -234,7 +234,6 @@ final class AppState: ObservableObject {
     func switchTo(_ name: String) {
         run {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
-            self.relinkSharedHistoryIfEnabled()
             do {
                 if !self.manager.profiles().contains(name) {
                     try self.manager.createProfile(name: name) // CLI-only name used for Desktop — dir on demand
@@ -244,6 +243,9 @@ final class AppState: ObservableObject {
             } catch {
                 Notifier.post("Switch failed", error.localizedDescription)
             }
+            // After the switch, so the merge hands the master to the new active
+            // profile (its <account>/<org> becomes the real pile, not a symlink).
+            self.relinkSharedHistoryIfEnabled()
             self.claude.relaunch()
             // A profile that has never logged in can't be prelinked yet (its
             // account/org ids don't exist until Claude writes them at login) —
@@ -426,7 +428,7 @@ final class AppState: ObservableObject {
         run {
             guard await self.claude.quit() else { return self.abortQuitFailed() }
             do {
-                let backup = try self.manager.enableSharedHistory()
+                let backup = try self.manager.enableSharedHistory(promoteActive: true)
                 self.claude.relaunch()
                 Notifier.post("Shared history enabled",
                               backup.map { "Backup: \($0.path)" } ?? "Was already enabled.")
@@ -607,7 +609,9 @@ final class AppState: ObservableObject {
     /// is why this runs during switches and not on a timer.
     private func relinkSharedHistoryIfEnabled() {
         guard manager.sharedHistoryEnabled else { return }
-        do { try manager.enableSharedHistory() }
+        // promoteActive: hand the master pile to whoever is live now, so Claude
+        // reads/writes a real directory instead of a symlink it could shadow.
+        do { try manager.enableSharedHistory(promoteActive: true) }
         catch { Notifier.post("Session re-link failed", error.localizedDescription) }
     }
 

@@ -564,6 +564,106 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertEqual(try fm.contentsOfDirectory(atPath: aOrg.path).sorted(), ["one.json"])
     }
 
+    // MARK: - Switch + shared-history visibility
+
+    struct Acct { let profile: String; let acct: String; let org: String }
+
+    func login(_ a: Acct) throws {
+        try write(#"{"ownerAccountId":"\#(a.acct)"}"#,
+                  to: profile(a.profile).appendingPathComponent("cowork-enabled-cli-ops.json"))
+        try write(#"{"dxt:desk:\#(a.org)":1}"#,
+                  to: profile(a.profile).appendingPathComponent("config.json"))
+    }
+
+    /// Simulate Claude (active account `a`) creating a session: writes through the
+    /// live Claude symlink exactly as the app does — claudeDir -> profile -> shared tree.
+    func claudeWrite(_ uuid: String, as a: Acct) throws {
+        let p = pm.claudeDir.appendingPathComponent(
+            "\(ProfileManager.sessionTrees[0])/\(a.acct)/\(a.org)/\(uuid)")
+        try write("session", to: p)
+    }
+
+    /// Mirror the switch flow: switch first, then relink promoting the now-active
+    /// account to master (as AppState.switchTo does after the fix).
+    func appSwitch(to a: Acct) throws {
+        if !pm.profiles().contains(a.profile) { try pm.createProfile(name: a.profile) }
+        try pm.switchTo(name: a.profile)
+        if pm.sharedHistoryEnabled { try pm.enableSharedHistory(promoteActive: true) }
+    }
+
+    func activeOrg(_ a: Acct) -> URL {
+        pm.claudeDir.appendingPathComponent("\(ProfileManager.sessionTrees[0])/\(a.acct)/\(a.org)")
+    }
+
+    /// Sessions the active account's sidebar can actually see (its org path, symlinks resolved).
+    func visibleSessions(_ a: Acct) -> Set<String> {
+        let items = (try? fm.contentsOfDirectory(atPath: activeOrg(a).resolvingSymlinksInPath().path)) ?? []
+        return Set(items)
+    }
+
+    /// Switching to any profile must hand it the real master pile — never a symlink
+    /// Claude's own writes could shadow (the "session hilang after switch" bug) — and
+    /// every shared session stays visible through it.
+    func testSwitchGivesActiveProfileTheRealMasterAndKeepsSessionsVisible() throws {
+        let main = Acct(profile: "main", acct: "acct-main", org: "11111111-1111-1111-1111-111111111111")
+        let work = Acct(profile: "work", acct: "acct-work", org: "22222222-2222-2222-2222-222222222222")
+        let other = Acct(profile: "other", acct: "acct-other", org: "33333333-3333-3333-3333-333333333333")
+
+        try makeRealClaudeDir()
+        try pm.migrate(name: main.profile)          // main active
+        for a in [main, work, other] {
+            if a.profile != main.profile { try pm.createProfile(name: a.profile) }
+            try login(a)
+        }
+        // Seed main heavily so the file-count master is main's org, not work/other's:
+        // without master-follows-active they would run on a symlink to it.
+        var all: Set<String> = []
+        for i in 0..<5 { try claudeWrite("s-main-\(i)", as: main); all.insert("s-main-\(i)") }
+        try pm.enableSharedHistory(promoteActive: true)
+
+        let seq = [work, other, main, work, other, work, main, other]
+        for (i, next) in seq.enumerated() {
+            try appSwitch(to: next)
+            let id = "s-\(next.profile)-\(i + 1)"
+            try claudeWrite(id, as: next); all.insert(id)
+
+            XCTAssertTrue(isRealDir(activeOrg(next)),
+                "switch #\(i + 1): \(next.profile)'s org dir must be the real master, not a symlink")
+            let visible = visibleSessions(next)
+            XCTAssertEqual(visible, all,
+                "switch #\(i + 1) to \(next.profile): missing \(all.subtracting(visible))")
+        }
+    }
+
+    /// An account that logged in and opened a session before it was linked owns a
+    /// real "island" of its own sessions, disconnected from the shared pile. The
+    /// next promoting relink must fold the pile into it — nothing lost, all visible.
+    func testPromotingRelinkHealsAnIslandedAccount() throws {
+        let main = Acct(profile: "main", acct: "acct-main", org: "11111111-1111-1111-1111-111111111111")
+        let work = Acct(profile: "work", acct: "acct-work", org: "22222222-2222-2222-2222-222222222222")
+
+        try makeRealClaudeDir()
+        try pm.migrate(name: main.profile)
+        try pm.createProfile(name: work.profile)
+        try login(main); try login(work)
+        try claudeWrite("m1", as: main)
+        try claudeWrite("m2", as: main)
+        try pm.enableSharedHistory(promoteActive: true)   // master = main's org
+
+        // work is now active but its org dir is a fresh real island Claude wrote
+        // before any relink saw it (the first-login / new-org window).
+        try pm.switchTo(name: work.profile)
+        let island = activeOrg(work)
+        try fm.removeItem(at: island)                      // drop the prelinked symlink
+        try write("w1", to: island.appendingPathComponent("w1"))
+
+        try pm.enableSharedHistory(promoteActive: true)    // heal
+
+        XCTAssertTrue(isRealDir(island), "work must own the real master after the relink")
+        XCTAssertEqual(Set(try fm.contentsOfDirectory(atPath: island.path)),
+                       ["m1", "m2", "w1"], "island folded into the shared pile, nothing lost")
+    }
+
     // MARK: - Display order
 
     func testOrderedRespectsSavedOrderAndPutsUnknownNamesLast() throws {

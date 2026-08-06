@@ -194,9 +194,17 @@ public final class ProfileManager {
 
     /// Merge every profile's session trees into `_shared-sessions` and symlink them back.
     /// Returns the backup directory, or nil when there was nothing to migrate (idempotent re-run).
+    ///
+    /// `promoteActive` makes the live account own the master: its `<account>/<org>`
+    /// becomes the real session pile and every other account links to it. Claude
+    /// then always reads and writes a real directory, never a symlink its own
+    /// writes could shadow with a fresh (empty) one — the cause of sessions
+    /// vanishing from the sidebar after a switch. Callers that run at a known-idle
+    /// moment (switch, Claude quit, launch) pass true; tests default to false.
     @discardableResult
-    public func enableSharedHistory(now: Date = Date()) throws -> URL? {
+    public func enableSharedHistory(now: Date = Date(), promoteActive: Bool = false) throws -> URL? {
         let names = profiles()
+        let active = promoteActive ? activeProfile() : nil
 
         // Backup first: copy every real (not yet symlinked) session tree.
         let backup = try backupRealTrees(tag: "backup", now: now)
@@ -215,10 +223,27 @@ public final class ProfileManager {
                 // Missing trees get linked too, so future sessions land in the shared tree.
                 try fm.createSymbolicLink(at: link, withDestinationURL: sharedTree)
             }
-            let master = try consolidateOrgDirs(in: sharedTree)
+            let preferred = active.flatMap { activeOrgDir(in: sharedTree, profile: $0) }
+            let master = try consolidateOrgDirs(in: sharedTree, preferred: preferred)
             try prelinkAccounts(in: sharedTree, master: master, profiles: names)
         }
         return backup
+    }
+
+    /// The active account's `<account>/<org>` path inside `tree`, once Claude has
+    /// recorded its ids. With several orgs, prefer one that already holds real
+    /// sessions (the one Claude just used), else any that exists, else the first —
+    /// whichever we pick becomes the real master and the rest link to it, so every
+    /// org of the account still resolves to the pile.
+    private func activeOrgDir(in tree: URL, profile name: String) -> URL? {
+        let dir = profilesDir.appendingPathComponent(name)
+        guard let account = accountID(of: dir) else { return nil }
+        let orgs = orgIDs(of: dir).sorted()
+        guard !orgs.isEmpty else { return nil }
+        let candidates = orgs.map { tree.appendingPathComponent(account).appendingPathComponent($0) }
+        return candidates.first(where: isRealDirectory)
+            ?? candidates.first(where: itemExists)
+            ?? candidates.first
     }
 
     /// Undo sharing. Merged sessions cannot be split back per account, so the
@@ -453,28 +478,65 @@ public final class ProfileManager {
         }
     }
 
-    /// Inside a shared tree, pick the <account>/<org> dir with the most files as master,
-    /// merge every other real org dir into it, and symlink them to the master.
-    /// Returns the master (the tree's single remaining real org dir), if any.
+    /// Collapse a shared tree to a single real `<account>/<org>` master with every
+    /// other org dir symlinked to it. The master is `preferred` (the active
+    /// account's org dir) when given — relocated there so the live Claude owns a
+    /// real pile — otherwise the real dir with the most files. Returns the master.
+    ///
+    /// The final pass points every other org entry straight at the master: real
+    /// islands (a fresh dir Claude wrote before it was linked) are merged in, and
+    /// stale/looping symlinks are re-pointed — so a moved master never leaves a
+    /// broken link or a growing symlink chain behind.
     @discardableResult
-    private func consolidateOrgDirs(in tree: URL) throws -> URL? {
-        var orgDirs: [URL] = []
-        for account in try realSubdirectories(of: tree) {
-            orgDirs.append(contentsOf: try realSubdirectories(of: account))
+    private func consolidateOrgDirs(in tree: URL, preferred: URL? = nil) throws -> URL? {
+        // Every <account>/<org> entry, real dirs and symlinks alike.
+        func orgEntries() throws -> [URL] {
+            var out: [URL] = []
+            for account in try realSubdirectories(of: tree) {
+                for name in (try? fm.contentsOfDirectory(atPath: account.path)) ?? [] {
+                    let u = account.appendingPathComponent(name)
+                    if isRealDirectory(u) || isSymlink(u) { out.append(u) }
+                }
+            }
+            return out
         }
-        guard orgDirs.count > 1 else { return orgDirs.first }
 
-        orgDirs.sort { $0.path < $1.path } // deterministic tie-break
-        var master = orgDirs[0]
-        var bestCount = fileCount(in: master)
-        for dir in orgDirs.dropFirst() {
+        let realOrgs = try orgEntries().filter(isRealDirectory).sorted { $0.path < $1.path }
+        guard !realOrgs.isEmpty else { return nil }
+
+        // The pile: real dir with the most files (deterministic tie-break by path).
+        var pile = realOrgs[0]
+        var bestCount = fileCount(in: pile)
+        for dir in realOrgs.dropFirst() {
             let count = fileCount(in: dir)
-            if count > bestCount { master = dir; bestCount = count }
+            if count > bestCount { pile = dir; bestCount = count }
         }
-        for dir in orgDirs where dir != master {
-            try merge(contentsOf: dir, into: master)
-            try fm.removeItem(at: dir)
-            try fm.createSymbolicLink(at: dir, withDestinationURL: master)
+
+        // Master follows the active account: relocate the pile into its org dir,
+        // leaving a symlink where the pile used to be so old accounts still resolve.
+        // Fold any island already at `preferred` into the pile first, then move the
+        // pile wholesale — so none of the pile's files can be lost to a name clash.
+        var master = pile
+        if let preferred, preferred.path != pile.path {
+            if isRealDirectory(preferred) { try merge(contentsOf: preferred, into: pile) }
+            if itemExists(preferred) { try fm.removeItem(at: preferred) } // island dir or stale symlink
+            try fm.createDirectory(at: preferred.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: pile, to: preferred)
+            try fm.createSymbolicLink(at: pile, withDestinationURL: preferred)
+            master = preferred
+        }
+
+        // ponytail: rewrites all links every relink (O(accounts)); fine at this scale.
+        for entry in try orgEntries() where entry.path != master.path {
+            if isRealDirectory(entry) {
+                try merge(contentsOf: entry, into: master)
+                try fm.removeItem(at: entry)
+            } else if (try? fm.destinationOfSymbolicLink(atPath: entry.path)) == master.path {
+                continue // already points straight at the master
+            } else {
+                try fm.removeItem(at: entry)
+            }
+            try fm.createSymbolicLink(at: entry, withDestinationURL: master)
         }
         return master
     }
