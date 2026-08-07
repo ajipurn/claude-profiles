@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let name = self.state.allProfiles[index]
             if name != self.state.activeProfile { self.state.switchTo(name) }
         }
-        scheduleUpdateChecks()
+        _ = Updater.shared // starts Sparkle's scheduled background checks
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.autosaveName = "dev.local.ClaudeProfiles.status"
@@ -251,40 +251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func menuOpenWindow() { showMainWindow() }
     @objc private func menuRefreshUsage() { state.refreshUsage() }
-
-    // MARK: Update check
-
-    /// Weekly, optional (Settings toggle, default on), and the app's only
-    /// self-initiated network request: GitHub's public releases endpoint.
-    /// Fails soft — no release, no network, no noise.
-    private func scheduleUpdateChecks() {
-        maybeCheckForUpdates()
-        Timer.scheduledTimer(withTimeInterval: 12 * 3600, repeats: true) { _ in
-            Task { @MainActor [weak self] in self?.maybeCheckForUpdates() }
-        }
-    }
-
-    private func maybeCheckForUpdates() {
-        let defaults = UserDefaults.standard
-        guard defaults.object(forKey: "autoUpdateCheck") == nil
-                || defaults.bool(forKey: "autoUpdateCheck") else { return }
-        let last = defaults.object(forKey: "lastUpdateCheckAt") as? Date ?? .distantPast
-        guard Date().timeIntervalSince(last) > 7 * 24 * 3600 else { return }
-        defaults.set(Date(), forKey: "lastUpdateCheckAt")
-        Task {
-            let api = URL(string: "https://api.github.com/repos/ajipurn/claude-profiles/releases/latest")!
-            guard let (data, response) = try? await URLSession.shared.data(from: api),
-                  (response as? HTTPURLResponse)?.statusCode == 200,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = json["tag_name"] as? String else { return }
-            guard AppVersion.isNewer(tag, than: appVersion),
-                  UserDefaults.standard.string(forKey: "lastNotifiedUpdateTag") != tag else { return }
-            UserDefaults.standard.set(tag, forKey: "lastNotifiedUpdateTag")
-            Notifier.post("Claude Profiles \(tag) is available",
-                          "Click to open the release page.",
-                          userInfo: ["openURL": githubURL.appendingPathComponent("releases/latest").absoluteString])
-        }
-    }
 
     // MARK: Main window
 

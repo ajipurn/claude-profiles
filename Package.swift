@@ -4,6 +4,9 @@ import PackageDescription
 let package = Package(
     name: "ClaudeProfiles",
     platforms: [.macOS(.v13)],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+    ],
     targets: [
         // Vendored zstd 1.5.7 (decompress side only, BSD) — Claude Desktop's
         // HTTP cache stores response bodies zstd-compressed and macOS ships no
@@ -18,7 +21,7 @@ let package = Package(
             ]
         ),
         .target(name: "ClaudeProfilesCore", dependencies: ["CZstd"]),
-        .executableTarget(name: "ClaudeProfiles", dependencies: ["ClaudeProfilesCore"]),
+        .executableTarget(name: "ClaudeProfiles", dependencies: ["ClaudeProfilesCore", .product(name: "Sparkle", package: "Sparkle")]),
         .testTarget(name: "ClaudeProfilesCoreTests", dependencies: ["ClaudeProfilesCore"]),
     ]
 )

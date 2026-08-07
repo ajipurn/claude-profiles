@@ -13,25 +13,76 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift test
 
+  # Compile + assemble the bundle (incl. Sparkle embedding) on every push/PR, so
+  # app-target breakage is caught before a tag ever cuts a release.
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app bundle
+        run: sh scripts/make-app.sh
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, build]
     runs-on: macos-15
     permissions:
       contents: write
+    env:
+      SPARKLE_VERSION: "2.9.5"
     steps:
       - uses: actions/checkout@v4
       # SwiftPM build + hand-assembled, ad-hoc signed bundle — same script as
-      # local builds. The xcodegen project is for editing in Xcode only; its
-      # single-target layout cannot resolve the ClaudeProfilesCore module.
+      # local builds. The public EdDSA key (safe to embed) comes from a repo
+      # variable; the app disables auto-update gracefully if it is unset.
       - name: Build app bundle
+        env:
+          SUPUBLIC_EDKEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
         run: sh scripts/make-app.sh "${GITHUB_REF_NAME#v}" "${{ github.run_number }}"
-      - name: Package as DMG
+
+      # Sparkle updates from a .zip; the DMG stays for manual first installs.
+      - name: Package artifacts
         run: |
+          ditto -c -k --sequesterRsrc --keepParent "dist/Claude Profiles.app" ClaudeProfiles.zip
           mkdir dmg
-          mv "dist/Claude Profiles.app" dmg/
+          cp -R "dist/Claude Profiles.app" dmg/
           ln -s /Applications dmg/Applications
           hdiutil create -volname "Claude Profiles" -srcfolder dmg -ov -format UDZO ClaudeProfiles.dmg
-      - run: gh release create "$GITHUB_REF_NAME" ClaudeProfiles.dmg --generate-notes
+
+      - name: Sign update & build appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "SPARKLE_PRIVATE_KEY secret not set — skipping appcast (no auto-update this release)."
+            exit 0
+          fi
+          curl -fsSL -o sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          tar -xf sparkle.tar.xz bin/generate_appcast
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > sparkle_key
+          mkdir archives && cp ClaudeProfiles.zip archives/
+          ./bin/generate_appcast --ed-key-file sparkle_key \
+            --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/" \
+            -o appcast.xml archives
+          rm -f sparkle_key
+
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" ClaudeProfiles.dmg ClaudeProfiles.zip --generate-notes
+
+      # Feed lives at a stable raw-on-main URL (SUFeedURL). Overwrite it with the
+      # latest single-item appcast; [skip ci] keeps this from retriggering CI.
+      - name: Publish appcast to main
+        if: hashFiles('appcast.xml') != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mv appcast.xml "$RUNNER_TEMP/appcast.xml"   # keep it across the branch switch
+          git fetch origin main
+          git checkout main
+          mv -f "$RUNNER_TEMP/appcast.xml" appcast.xml
+          git add appcast.xml
+          git commit -m "chore: update appcast for ${GITHUB_REF_NAME} [skip ci]" || exit 0
+          git push origin main

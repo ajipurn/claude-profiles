@@ -20,8 +20,6 @@ struct WindowView: View {
     enum ViewMode: String { case list, grid }
     enum Page { case profiles, settings }
 
-    @AppStorage("autoUpdateCheck") private var autoUpdateCheck = true
-
     var body: some View {
         Group {
             switch state.mode {
@@ -122,9 +120,11 @@ struct WindowView: View {
                         .padding(.horizontal, 8)
                         .frame(height: 30)
                     VStack(alignment: .leading, spacing: 5) {
-                        Toggle("Check for updates weekly", isOn: $autoUpdateCheck)
+                        Toggle("Check for updates automatically",
+                               isOn: Updater.shared?.automaticChecks ?? .constant(false))
                             .toggleStyle(RaisedToggleStyle())
-                        Text("The app's only self-initiated network request: GitHub's public releases feed. Nothing about you or your profiles is sent.")
+                            .disabled(Updater.shared == nil)
+                        Text("Downloads and installs cryptographically signed updates from GitHub Releases. Only the update feed is fetched — nothing about you or your profiles is sent.")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -847,18 +847,11 @@ struct ContextChip: View {
 
 // MARK: - About & Updates
 
-/// Manual-only update check: one GitHub API request when the user clicks the
-/// button, never in the background — the app's "no internet access" promise
-/// stays true for everything it does on its own.
+/// Sparkle drives the update flow (check → download → verify → install →
+/// relaunch); this panel just launches a manual check. Automatic checks are
+/// toggled in Settings. Only the signed update feed is ever fetched.
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var status = Status.idle
-
-    enum Status: Equatable {
-        case idle, checking, upToDate
-        case available(String)
-        case failed(String)
-    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -871,8 +864,15 @@ struct AboutView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
-            updateArea
-                .frame(height: 44)
+            Group {
+                if let updater = Updater.shared {
+                    Button("Check for Updates…") { updater.checkForUpdates() }
+                } else {
+                    Link("View Releases", destination: githubURL.appendingPathComponent("releases/latest"))
+                        .font(.system(size: 11))
+                }
+            }
+            .frame(height: 44)
 
             Link(destination: githubURL) {
                 Label("ajipurn/claude-profiles", systemImage: "link")
@@ -888,52 +888,5 @@ struct AboutView: View {
         }
         .padding(24)
         .frame(width: 300)
-    }
-
-    @ViewBuilder private var updateArea: some View {
-        switch status {
-        case .idle:
-            Button("Check for Updates…") { check() }
-        case .checking:
-            ProgressView().controlSize(.small)
-        case .upToDate:
-            Label("Up to date", systemImage: "checkmark.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        case .available(let tag):
-            VStack(spacing: 4) {
-                Text("\(tag) is available")
-                    .font(.system(size: 11, weight: .medium))
-                Link("Open Releases", destination: githubURL.appendingPathComponent("releases/latest"))
-                    .font(.system(size: 11))
-            }
-        case .failed(let why):
-            VStack(spacing: 4) {
-                Text(why)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Button("Try Again") { check() }
-                    .controlSize(.small)
-            }
-        }
-    }
-
-    private func check() {
-        status = .checking
-        Task {
-            do {
-                let api = URL(string: "https://api.github.com/repos/ajipurn/claude-profiles/releases/latest")!
-                let (data, response) = try await URLSession.shared.data(from: api)
-                guard (response as? HTTPURLResponse)?.statusCode == 200,
-                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let tag = json["tag_name"] as? String else {
-                    status = .failed("No release found")
-                    return
-                }
-                status = AppVersion.isNewer(tag, than: appVersion) ? .available(tag) : .upToDate
-            } catch {
-                status = .failed("Couldn't reach GitHub")
-            }
-        }
     }
 }
