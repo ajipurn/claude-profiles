@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if name != self.state.activeProfile { self.state.switchTo(name) }
         }
         _ = Updater.shared // starts Sparkle's scheduled background checks
+        DispatchQueue.main.async { MoveToAgentProfiles.offer(appName: "Claude Profiles") }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.autosaveName = "dev.local.ClaudeProfiles.status"
@@ -228,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(menuItem("Open Claude Profiles", #selector(menuOpenWindow), key: "o"))
         menu.addItem(menuItem("Refresh Usage", #selector(menuRefreshUsage), key: "r"))
         menu.addItem(.separator())
+        menu.addItem(menuItem("Move to Agent Profiles…", #selector(menuMoveToAgentProfiles), key: ""))
         menu.addItem(NSMenuItem(title: "Quit Claude Profiles",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
@@ -250,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func menuOpenWindow() { showMainWindow() }
+    @objc private func menuMoveToAgentProfiles() { MoveToAgentProfiles.offer(appName: "Claude Profiles") }
     @objc private func menuRefreshUsage() { state.refreshUsage() }
 
     // MARK: Main window
@@ -634,6 +637,9 @@ struct PanelView: View {
             }
             ActionRow(icon: "folder", title: "Reveal Profiles in Finder") {
                 state.revealProfilesFolder()
+            }
+            ActionRow(icon: "arrow.right.circle", title: "Move to Agent Profiles…") {
+                MoveToAgentProfiles.offer(appName: "Claude Profiles")
             }
         }
     }

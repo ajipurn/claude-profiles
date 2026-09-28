@@ -11,8 +11,8 @@
 set -e
 cd "$(dirname "$0")/.."
 
-VERSION="${1:-1.5.0}"
-BUILD="${2:-25}"
+VERSION="${1:-1.7.0}"
+BUILD="${2:-27}"
 
 # Sparkle auto-update: the feed is public; the public key is safe to embed (only
 # the private signing key is a secret, held by CI). The public key comes from

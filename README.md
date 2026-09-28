@@ -8,6 +8,9 @@
   Switch between Claude Desktop accounts in seconds — log in once per account, never again.
 </p>
 
+> [!IMPORTANT]
+> **Claude Profiles is now part of [Agent Profiles](https://github.com/ajipurn/agent-profiles)**, one menu bar app for Claude and Codex accounts. It reads the profiles you made here, including CLI profiles and shared history, so nothing needs setting up again. Claude Profiles 1.7.0 is the last release.
+
 ---
 
 Claude Desktop only remembers **one** login at a time. Switching accounts normally means logging out, logging back in, and losing your sidebar history every single time.
